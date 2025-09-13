@@ -1,0 +1,9 @@
+# 例：从 ./dataset/frame_1..frame_10 训练到 ./output_seq/model_frame_*
+python ta_train.py -s ./dataset/soccer -o ./output_seq/soccer --frames 1-10 --disable_viewer --densify_from_iter 1500 --densify_until_iter 5000 --densification_interval 200 --densify_grad_threshold 5e-4 --percent_dense 0.005 --opacity_reset_interval 6000 --iterations 10000
+
+
+# 渲染全部 model_frame_*（自动寻找每个模型的 latest iteration），黑底、24fps
+python ta_render.py -m ./output_seq/soccer -o ./renders_camA -c ./camera.json --frames all --video_name time_archival.mp4 
+
+python ta_render.py -m ./output_seq/soccer -o ./renders_cam_colmap --colmap_path ./dataset/frame_1 --image_name 00001.png --frames all --video_name time_archival.mp4
+
