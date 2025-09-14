@@ -43,12 +43,15 @@
       <span id="stats" class="pill">Load — ms | H2D — ms | Render — ms | Enc — ms | Total — ms | cache —</span>
 
       <span class="sep"></span>
-      <span class="pill">Mouse: look | WASD: move | Q/E: up/down | Scroll: FOV | Space: Play/Pause | Shift: fast</span>
+      <!-- English UI hint -->
+      <span class="pill">Arrows: look (←/→ yaw, ↑/↓ pitch) | WASD: move (relative to view) | Q/E: up/down | Scroll: FOV | Space: Play/Pause | Shift: fast</span>
     </div>
   </div>
 
 <script>
 (async () => {
+  'use strict';
+
   const SERVER = '';                       // same-origin
   const DPR = Math.min(window.devicePixelRatio || 1, 2);
 
@@ -61,17 +64,21 @@
   const bgChk = document.getElementById('bg');
   const statsEl = document.getElementById('stats');
 
-  // --- Fetch frame list ---
+  // --- Fetch frame list from server health ---
   let FRAMES = [];
-  try { FRAMES = (await fetch(`${SERVER}/health`).then(r=>r.json())).frames || []; }
-  catch (e) { console.warn(e); }
+  try {
+    const h = await fetch(`${SERVER}/health`).then(r=>r.json());
+    FRAMES = Array.isArray(h.frames) ? h.frames : [];
+  } catch (e) {
+    console.warn(e);
+  }
   if (FRAMES.length === 0) FRAMES = [1];
 
   // Map frame id -> index for robust advancing
   const FRAME_IDX = new Map(FRAMES.map((f,i)=>[f,i]));
   console.log('[Init] FRAMES:', FRAMES);
 
-  // Slider only mirrors state (does not drive advancing logic)
+  // Slider mirrors the factual frame id (we snap on input)
   frameSlider.min = String(FRAMES[0]);
   frameSlider.max = String(FRAMES[FRAMES.length-1]);
   console.log('[Init] slider range:', frameSlider.min, '→', frameSlider.max);
@@ -82,60 +89,125 @@
   frameVal.textContent = frameSlider.value;
 
   // --- Camera state ---
+  // Position in world space, yaw/pitch in radians; FOV is horizontal
   let pos = [0, 0, 3];
   let yaw = 0.0, pitch = 0.0;
   let fovxDeg = 60;
 
+  // Pressed key set (lower-case strings, e.g. 'w','arrowleft','shift')
   const keys = new Set();
   let lastTick = performance.now();
 
-  imgEl.addEventListener('click', () => imgEl.requestPointerLock?.());
-  document.addEventListener('mousemove', (e) => {
-    if (document.pointerLockElement !== imgEl) return;
-    const sens = 0.0025;
-    yaw   -= e.movementX * sens;
-    pitch -= e.movementY * sens;
-    const limit = Math.PI/2 - 0.001;
-    pitch = Math.max(-limit, Math.min(limit, pitch));
-    markCameraDirty();
-  });
-  document.addEventListener('wheel', (e) => { fovxDeg = clamp(fovxDeg + Math.sign(e.deltaY)*2, 30, 100); markCameraDirty(); }, {passive:true});
-  document.addEventListener('keydown', (e) => { keys.add(e.key.toLowerCase()); if (e.key===' ') { e.preventDefault(); togglePlay(); } });
-  document.addEventListener('keyup',   (e) => { keys.delete(e.key.toLowerCase()); });
-
+  // --- Helpers ---
   function clamp(x,a,b){ return Math.max(a,Math.min(b,x)); }
   function add(a,b){ return [a[0]+b[0],a[1]+b[1],a[2]+b[2]]; }
   function scale(a,s){ return [a[0]*s,a[1]*s,a[2]*s]; }
 
+  // --- Input: wheel -> FOV ---
+  // Mouse-look is intentionally DISABLED to reduce motion sickness.
+  // Only wheel is used for FOV adjustments.
+  document.addEventListener('wheel', (e) => {
+    fovxDeg = clamp(fovxDeg + Math.sign(e.deltaY)*2, 30, 100);
+    markCameraDirty();
+  }, {passive:true});
+
+  // --- Input: keyboard ---
+  // Arrow keys rotate the camera; WASD/QE move relative to camera forward/right/up.
+  // Space toggles playback. We avoid capturing keys while focus is inside inputs/selects.
+  document.addEventListener('keydown', (e) => {
+    const tag = (e.target && e.target.tagName ? e.target.tagName : '').toLowerCase();
+    if (tag === 'input' || tag === 'select' || tag === 'textarea') return;
+
+    const kRaw = e.key;               // e.g. 'ArrowLeft', 'w', ' '
+    const k = kRaw.toLowerCase();     // normalize for the keys Set
+
+    if (kRaw.startsWith('Arrow') || kRaw === ' ') e.preventDefault();
+    keys.add(k);
+
+    if (kRaw === ' ') togglePlay();
+  });
+
+  document.addEventListener('keyup', (e) => {
+    const k = e.key.toLowerCase();
+    keys.delete(k);
+  });
   function step(dt) {
     const speed = (keys.has('shift') ? 4.0 : 1.5) * dt;
-    const fwd   = [ -Math.sin(yaw)*Math.cos(pitch),  Math.sin(pitch), -Math.cos(yaw)*Math.cos(pitch) ];
-    const right = [  Math.cos(yaw), 0, -Math.sin(yaw) ];
-    const up    = [ 0,1,0 ];
+
+    // Keep movement basis consistent with the camera matrix:
+    // Use cz as "forward" (camera looks along +Z), cx as "right", world +Y as "up".
+    const fwd   = [ Math.sin(yaw) * Math.cos(pitch),  -Math.sin(pitch),  Math.cos(yaw) * Math.cos(pitch) ]; // == cz
+    const right = [ Math.cos(yaw), 0, -Math.sin(yaw) ];  // == cx (independent of pitch)
+    const up    = [ 0, 1, 0 ];                           // world up
+
     if (keys.has('w')) pos = add(pos, scale(fwd,  speed));
     if (keys.has('s')) pos = add(pos, scale(fwd, -speed));
-    if (keys.has('a')) pos = add(pos, scale(right, -speed));
-    if (keys.has('d')) pos = add(pos, scale(right,  speed));
-    if (keys.has('q')) pos = add(pos, scale(up,   -speed));
-    if (keys.has('e')) pos = add(pos, scale(up,    speed));
+    if (keys.has('a')) pos = add(pos, scale(right, -speed)); // strafe left
+    if (keys.has('d')) pos = add(pos, scale(right,  speed)); // strafe right
+    if (keys.has('q')) pos = add(pos, scale(up,   -speed));  // down
+    if (keys.has('e')) pos = add(pos, scale(up,    speed));  // up
   }
 
-  function currentCamera(width, height) {
-    const yawC = Math.cos(yaw), yawS = Math.sin(yaw);
-    const pitchC = Math.cos(pitch), pitchS = Math.sin(pitch);
-    const cx = [ yawC, 0, -yawS ];
-    const cy = [ yawS*pitchS, pitchC, yawC*pitchS ];
-    const cz = [ yawS*pitchC, -pitchS, yawC*pitchC ];  // forward
-    const Rwc = [ cx[0],cy[0],cz[0],  cx[1],cy[1],cz[1],  cx[2],cy[2],cz[2] ];
-    const Twc = [ -(Rwc[0]*pos[0] + Rwc[1]*pos[1] + Rwc[2]*pos[2]),
-                  -(Rwc[3]*pos[0] + Rwc[4]*pos[1] + Rwc[5]*pos[2]),
-                  -(Rwc[6]*pos[0] + Rwc[7]*pos[1] + Rwc[8]*pos[2]) ];
-    const R = [ Rwc[0],Rwc[3],Rwc[6],  Rwc[1],Rwc[4],Rwc[7],  Rwc[2],Rwc[5],Rwc[8] ];
-    const fovx = fovxDeg * Math.PI/180;
-    const fx = width / (2*Math.tan(fovx/2)); const fy = fx;
-    const cxp = width * 0.5, cyp = height * 0.5;
-    return { width, height, fx, fy, cx: cxp, cy: cyp, R, T: Twc, znear: 0.01, zfar: 100.0 };
-  }
+  // --- Rotation step: Arrow keys -> yaw/pitch ---
+function stepRot(dt) {
+  const rotSpeed = (keys.has('shift') ? 1.8 : 1.2); // radians per second
+  let changed = false;
+
+  if (keys.has('arrowleft'))  { yaw += rotSpeed * dt; changed = true; } // ← 左转
+  if (keys.has('arrowright')) { yaw -= rotSpeed * dt; changed = true; } // → 右转
+
+  if (keys.has('arrowup'))    { pitch -= rotSpeed * dt; changed = true; } // ↑ 抬头
+  if (keys.has('arrowdown'))  { pitch += rotSpeed * dt; changed = true; } // ↓ 低头
+
+  const limit = Math.PI/2 - 0.001;   // clamp to avoid gimbal flip
+  if (pitch >  limit) pitch =  limit;
+  if (pitch < -limit) pitch = -limit;
+
+  return changed;
+}
+
+
+  // --- Build current camera payload for server ---
+function currentCamera(width, height) {
+  const cy = Math.cos(yaw),  sy = Math.sin(yaw);
+  const cp = Math.cos(pitch), sp = Math.sin(pitch);
+
+  // Camera axes in world space (camera-to-world)
+  // right (cx), up (cy_axis), forward (cz)
+  const cx_axis = [  cy,       0,  -sy ];
+  const cy_axis = [  sy*sp,    cp,  cy*sp ];
+  const cz_axis = [  sy*cp,   -sp,  cy*cp ];
+
+  // camera->world (row-major, columns are cx,cy,cz)
+  const Rcw = [
+    cx_axis[0], cy_axis[0], cz_axis[0],
+    cx_axis[1], cy_axis[1], cz_axis[1],
+    cx_axis[2], cy_axis[2], cz_axis[2],
+  ];
+  // world->camera = transpose(camera->world), row-major
+  const Rwc = [
+    cx_axis[0], cx_axis[1], cx_axis[2],
+    cy_axis[0], cy_axis[1], cy_axis[2],
+    cz_axis[0], cz_axis[1], cz_axis[2],
+  ];
+
+  // T(world->camera) = -Rwc * C , C = camera center in world = pos
+  const T = [
+    -(Rwc[0]*pos[0] + Rwc[1]*pos[1] + Rwc[2]*pos[2]),
+    -(Rwc[3]*pos[0] + Rwc[4]*pos[1] + Rwc[5]*pos[2]),
+    -(Rwc[6]*pos[0] + Rwc[7]*pos[1] + Rwc[8]*pos[2]),
+  ];
+
+  // intrinsics from horizontal FOV (square pixels)
+  const fovx = fovxDeg * Math.PI/180;
+  const fx = width / (2 * Math.tan(fovx/2));
+  const fy = fx;
+  const cxp = width * 0.5, cyp = height * 0.5;
+
+  // IMPORTANT: send world->camera extrinsics
+  return { width, height, fx, fy, cx: cxp, cy: cyp, R: Rwc, T, znear: 0.01, zfar: 100.0 };
+}
+
 
   // ---------------------------
   // Serial rendering with back-pressure
@@ -156,7 +228,7 @@
   playBtn.addEventListener('click', togglePlay);
 
   frameSlider.addEventListener('input', () => {
-    // snap slider to nearest valid frame id
+    // Snap slider to nearest valid frame id (supports non-contiguous ids)
     const v = parseInt(frameSlider.value, 10);
     let nearest = FRAMES[0], best = Math.abs(FRAMES[0]-v);
     for (let i=1;i<FRAMES.length;i++){
@@ -167,13 +239,14 @@
     frameSlider.value = String(nearest);
     frameVal.textContent = frameSlider.value;
 
-    // manual seek stops autoplay
-    playing = false; 
+    // Manual seek stops autoplay
+    playing = false;
     playBtn.textContent = '▶';
 
     queueFrame(currentFrameId);
     pump();
   });
+
   resSel.addEventListener('change', () => { cameraDirty = true; pump(); });
   fmtSel.addEventListener('change',  () => { cameraDirty = true; pump(); });
   bgChk.addEventListener('change',   () => { cameraDirty = true; pump(); });
@@ -189,7 +262,7 @@
     try {
       await renderOne(target);
 
-      // update factual current frame after successful render
+      // Update factual current frame after successful render
       currentFrameId = target;
       frameSlider.value = String(target);
       frameVal.textContent = frameSlider.value;
@@ -206,14 +279,13 @@
           console.log('[Player] only one frame, stop.');
         }
       } else if (cameraDirty) {
-        // not playing: if camera changed, re-render current frame once
+        // Not playing: if camera changed, re-render current frame once
         queueFrame(currentFrameId);
       }
     } catch (e) {
       console.warn(e);
     } finally {
       inflight = false;
-      // IMPORTANT: do NOT consume the queue here. Only check flags.
       const hasMore = (queuedFrame !== null) || cameraDirty;
       console.log(`[Pump] done f=${target} | playing=${playing} | queued=${queuedFrame} | cameraDirty=${cameraDirty}`);
       if (hasMore) pump();
@@ -221,11 +293,7 @@
   }
 
   function decideNextTarget(){
-    // 1) explicit queued frame from UI/player
-    if (queuedFrame !== null) {
-      const f = queuedFrame; queuedFrame = null; return f;
-    }
-    // 2) camera changed ⇒ re-render current factual frame
+    if (queuedFrame !== null) { const f = queuedFrame; queuedFrame = null; return f; }
     if (cameraDirty) { cameraDirty = false; return currentFrameId; }
     return null;
   }
@@ -240,7 +308,7 @@
       camera: cam
     };
 
-    // client-side timer
+    // Client-side timer
     const t_client0 = performance.now();
 
     // Stage 1: load to GPU (blocking until H2D done)
@@ -280,17 +348,24 @@
     }
   }
 
-  // drive camera motion intent only
+  // Drive camera motion intent only; rendering is demand-driven via pump()
   function loop() {
     const now = performance.now();
     const dt = Math.min(0.05, (now - lastTick)/1000);
     lastTick = now;
-    if (keys.size > 0) { step(dt); markCameraDirty(); }
+
+    if (keys.size > 0) {
+      // Movement in camera-relative axes; rotation via Arrow keys
+      step(dt);
+      const rotated = stepRot(dt);
+      if (rotated) cameraDirty = true;
+      markCameraDirty();
+    }
     requestAnimationFrame(loop);
   }
   loop();
 
-  // initial render once page loads
+  // Initial render once page loads
   queueFrame(currentFrameId);
   pump();
 })();
