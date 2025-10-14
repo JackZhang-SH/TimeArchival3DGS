@@ -1,7 +1,4 @@
 # ninja log v7
-22	10682	7787334077601086	C:/Users/jackz/Desktop/Files/Research/Time_Archival_3DGS/gaussian-splatting/submodules/simple-knn/build/temp.win-amd64-cpython-38/Release/simple_knn.obj	caebee33d48e4da7
-17	10764	7787334077551488	C:/Users/jackz/Desktop/Files/Research/Time_Archival_3DGS/gaussian-splatting/submodules/simple-knn/build/temp.win-amd64-cpython-38/Release/ext.obj	ce1d5fe1653cc8db
-30	32112	7787334077676992	C:/Users/jackz/Desktop/Files/Research/Time_Archival_3DGS/gaussian-splatting/submodules/simple-knn/build/temp.win-amd64-cpython-38/Release/spatial.obj	60cc00433f07f2c7
-86	11136	7792643368494131	C:/Users/jackz/Desktop/Files/Research/Time_Archival_3DGS/TimeArchival3DGS/submodules/simple-knn/build/temp.win-amd64-cpython-38/Release/ext.obj	82699a4b1f3a561c
-91	11600	7792643368544191	C:/Users/jackz/Desktop/Files/Research/Time_Archival_3DGS/TimeArchival3DGS/submodules/simple-knn/build/temp.win-amd64-cpython-38/Release/simple_knn.obj	98a0fe67e9214b0
-100	32512	7792643368634164	C:/Users/jackz/Desktop/Files/Research/Time_Archival_3DGS/TimeArchival3DGS/submodules/simple-knn/build/temp.win-amd64-cpython-38/Release/spatial.obj	20862599bcf21169
+24	12061	7795210154769071	C:/Users/jackz/Desktop/Files/Research/Time_Archival_3DGS/TA-3DGS/submodules/simple-knn/build/temp.win-amd64-cpython-38/Release/simple_knn.obj	14398919dbaa6e5f
+20	18118	7795210154729070	C:/Users/jackz/Desktop/Files/Research/Time_Archival_3DGS/TA-3DGS/submodules/simple-knn/build/temp.win-amd64-cpython-38/Release/ext.obj	1e72eda06e989f8f
+30	49688	7795210154819078	C:/Users/jackz/Desktop/Files/Research/Time_Archival_3DGS/TA-3DGS/submodules/simple-knn/build/temp.win-amd64-cpython-38/Release/spatial.obj	ca4ba34ab833362e

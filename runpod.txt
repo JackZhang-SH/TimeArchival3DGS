@@ -1,0 +1,39 @@
+cd /workspace
+sudo apt-get update -y
+sudo apt-get install -y wget bzip2 git build-essential
+git clone https://github.com/JackZhang-SH/TimeArchival3DGS.git
+cd TimeArchival3DGS
+
+# 下载当前稳定版（Python 3.x）
+wget -O miniconda.sh https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+
+# 静默安装到 /workspace/miniconda3
+bash miniconda.sh -b -p /workspace/miniconda3
+
+# 让 conda 命令生效（向 ~/.bashrc 写入初始化）
+/workspace/miniconda3/bin/conda init bash
+
+# 使当前会话立刻生效
+source ~/.bashrc
+conda create -n TimeArchival3DGS python=3.8
+conda activate TimeArchival3DGS
+pip install --upgrade pip
+
+# 2) 安装 PyTorch 2.2 系列（与 Py3.8 最稳）——cu121 轮子 + 同步版本的 torchvision/torchaudio
+pip install --index-url https://download.pytorch.org/whl/cu121 \
+  --extra-index-url https://pypi.org/simple \
+  torch==2.2.2 torchvision==0.17.2 torchaudio==2.2.2
+
+# 3) 常用依赖
+pip install tqdm plyfile pillow imageio[ffmpeg] opencv-python joblib
+pip install --no-build-isolation --no-cache-dir ./submodules/diff-gaussian-rasterization
+pip install --no-build-isolation --no-cache-dir ./submodules/simple-knn
+pip install --no-build-isolation --no-cache-dir ./submodules/fused-ssim
+
+gdown --folder --id 1kq6b26OoOSPZXPCZCCnqICCKOgX5sUvd -O ./dataset/ --remaining-ok --continue
+https://drive.google.com/file/d/1kq6b26OoOSPZXPCZCCnqICCKOgX5sUvd/view?usp=drive_link
+
+scp -r -C -P 19152 root@185.216.20.89:/workspace/TimeArchival3DGS/output_seq ./output_seq
+scp -r -P 22119 ./dataset/soccer_ellipse_demo_test root@69.30.85.47:/workspace/TimeArchival3DGS/dataset
+
+

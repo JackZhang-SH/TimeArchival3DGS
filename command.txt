@@ -1,9 +1,27 @@
 # 例：从 ./dataset/frame_1..frame_10 训练到 ./output_seq/model_frame_*
-python ta_train.py -s ./dataset/soccer -o ./output_seq/soccer --frames 1-10 --disable_viewer --densify_from_iter 1500 --densify_until_iter 5000 --densification_interval 200 --densify_grad_threshold 5e-4 --percent_dense 0.005 --opacity_reset_interval 6000 --iterations 10000
 
+conda activate TimeArchival3DGS
 
 # 渲染全部 model_frame_*（自动寻找每个模型的 latest iteration），黑底、24fps
-python ta_render.py -m ./output_seq/soccer -o ./renders_camA -c ./camera.json --frames all --video_name time_archival.mp4 
+python ta_render.py -m ./output_seq/soccer_ellipse -o ./renders_camA -c ./camera.json --frames all --video_name time_archival.mp4 
 
-python ta_render.py -m ./output_seq/soccer -o ./renders_cam_colmap --colmap_path ./dataset/frame_1 --image_name 00001.png --frames all --video_name time_archival.mp4
+python ta_render.py -m ./output_seq/soccer_ellipse -o ./renders_cam_colmap --colmap_path ./dataset/frame_1 --image_name 00001.png --frames all --video_name time_archival.mp4
 
+python ta_train.py -s ./dataset/soccer_ellipse -o ./output_seq/soccer_ellipse --frames 1 -- --disable_viewer -r 2 --densify_from_iter 1500 --densify_until_iter 5000 --densification_interval 200 --densify_grad_threshold 5e-4 --percent_dense 0.005 --opacity_reset_interval 6000 --iterations 15000
+
+
+Aggressive-8k
+python ta_train.py -s ./dataset/soccer_ellipse -o ./output_seq/soccer_ellipse --frames 1 -- --iterations 8000 -r 1 --sh_degree 3 --densify_from_iter 2500 --densify_until_iter 4500 --densification_interval 600 --densify_grad_threshold 1e-3 --opacity_reset_interval 10000 --lambda_dssim 0.15 --depth_l1_weight_init 0 --depth_l1_weight_final 0 --test_iterations 999999 --save_iterations 999999 --disable_viewer
+
+Fast-12k（速度/质量平衡，推荐）
+python ta_train.py -s ./dataset/soccer_ellipse -o ./output_seq/soccer_ellipse --frames 1 -- --iterations 12000 -r 1 --sh_degree 3 --densify_from_iter 2000 --densify_until_iter 5000 --densification_interval 400 --densify_grad_threshold 7e-4 --opacity_reset_interval 8000 --depth_l1_weight_init 0 --depth_l1_weight_final 0 --test_iterations 999999 --save_iterations 999999 --disable_viewer
+
+
+
+gdown --folder --id 1pz-vQT-MbSNGM37t0sO0ZWuM9uZ1X1ry -O ./gdrive_folder --remaining-ok --continue
+
+zip -r output_seq.zip output_seq
+
+
+python pack/ta_pack.py -m ./output_seq --name soccer_ellipse_200000 --prefix model_frame_ --out ./output_seq_packed --autocreate
+python server/ta_server_slots.py -p .\output_seq_packed --prefix model_frame_ --slots 4  --warmup --neighbor_prefetch --camera_json ..\camera.json --port 7860

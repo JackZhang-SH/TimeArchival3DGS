@@ -51,7 +51,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     scene = Scene(dataset, gaussians)
     print("[DEBUG] Scene constructed.")
-    scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
@@ -91,7 +90,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         iter_start.record()
 
-        gaussians.update_learning_rate(iteration)
+        # 仅当 optimizer 存在时才更新学习率（兼容自定义/稀疏优化器）
+        if getattr(gaussians, "optimizer", None) is not None:
+            gaussians.update_learning_rate(iteration)
+
 
         # Every 1000 its we increase the levels of SH up to a maximum degree
         if iteration % 1000 == 0:

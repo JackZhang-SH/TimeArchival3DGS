@@ -22,9 +22,9 @@ rule cuda_compile
 
 
 
-build C$:\Users\jackz\Desktop\Files\Research\Time_Archival_3DGS\TimeArchival3DGS\submodules\simple-knn\build\temp.win-amd64-cpython-38\Release\ext.obj: compile C$:\Users\jackz\Desktop\Files\Research\Time_Archival_3DGS\TimeArchival3DGS\submodules\simple-knn\ext.cpp
-build C$:\Users\jackz\Desktop\Files\Research\Time_Archival_3DGS\TimeArchival3DGS\submodules\simple-knn\build\temp.win-amd64-cpython-38\Release\simple_knn.obj: cuda_compile C$:\Users\jackz\Desktop\Files\Research\Time_Archival_3DGS\TimeArchival3DGS\submodules\simple-knn\simple_knn.cu
-build C$:\Users\jackz\Desktop\Files\Research\Time_Archival_3DGS\TimeArchival3DGS\submodules\simple-knn\build\temp.win-amd64-cpython-38\Release\spatial.obj: cuda_compile C$:\Users\jackz\Desktop\Files\Research\Time_Archival_3DGS\TimeArchival3DGS\submodules\simple-knn\spatial.cu
+build C$:\Users\jackz\Desktop\Files\Research\Time_Archival_3DGS\TA-3DGS\submodules\simple-knn\build\temp.win-amd64-cpython-38\Release\ext.obj: compile C$:\Users\jackz\Desktop\Files\Research\Time_Archival_3DGS\TA-3DGS\submodules\simple-knn\ext.cpp
+build C$:\Users\jackz\Desktop\Files\Research\Time_Archival_3DGS\TA-3DGS\submodules\simple-knn\build\temp.win-amd64-cpython-38\Release\simple_knn.obj: cuda_compile C$:\Users\jackz\Desktop\Files\Research\Time_Archival_3DGS\TA-3DGS\submodules\simple-knn\simple_knn.cu
+build C$:\Users\jackz\Desktop\Files\Research\Time_Archival_3DGS\TA-3DGS\submodules\simple-knn\build\temp.win-amd64-cpython-38\Release\spatial.obj: cuda_compile C$:\Users\jackz\Desktop\Files\Research\Time_Archival_3DGS\TA-3DGS\submodules\simple-knn\spatial.cu
 
 
 
