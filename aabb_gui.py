@@ -51,15 +51,21 @@ def main(pc_path, init_json, out_json):
     scene.setup_camera(60.0, aabb0, aabb0.get_center())
     w.add_child(scene)
 
-    # 右侧面板：6 滑杆 + 按钮
+    # —— 原“右侧面板：6 滑杆 + 按钮”处，替换为 —— 
     em = w.theme.font_size
     panel = gui.Vert(0.25*em, gui.Margins(0.5*em,0.5*em,0.5*em,0.5*em))
+
+    # 用 2 列网格，标签和滑条并排，压缩高度
+    grid = gui.VGrid(2, 0.25*em)
+    panel.add_child(grid)
+
     sliders = {}
     def add_slider(name, v, vmin, vmax):
-        panel.add_child(gui.Label(name))
+        lbl = gui.Label(name)
         s = gui.Slider(gui.Slider.DOUBLE)
         s.set_limits(vmin, vmax); s.double_value = v
-        sliders[name] = s; panel.add_child(s)
+        sliders[name] = s
+        grid.add_child(lbl); grid.add_child(s)
         return s
 
     sx0 = add_slider("xmin", aabb[0], lo[0], hi[0])
@@ -83,8 +89,7 @@ def main(pc_path, init_json, out_json):
     for s in sliders.values():
         s.set_on_value_changed(lambda _ : update_bbox())
 
-    # 按钮行
-    btn_row = gui.Horiz()
+    
     def on_save(_):
         a = update_bbox()
         with open(out_json, "w") as f:
@@ -96,19 +101,35 @@ def main(pc_path, init_json, out_json):
         sz0.double_value, sz1.double_value = lo[2], hi[2]
         update_bbox()
 
+    toolbar = gui.Horiz()
     btn_save = gui.Button("Save AABB"); btn_save.set_on_clicked(on_save)
     btn_reset = gui.Button("Reset to PC bounds"); btn_reset.set_on_clicked(on_reset)
-    btn_row.add_child(btn_save); btn_row.add_child(btn_reset)
-    panel.add_child(gui.Label(f"PC: {os.path.basename(pc_path)}"))
-    panel.add_child(btn_row)
+    toolbar.add_child(gui.Label(f"PC: {os.path.basename(pc_path)}"))
+    toolbar.add_child(btn_save)
+    toolbar.add_child(btn_reset)
+
+
 
     # 将面板放到右侧
-    w.add_child(panel)
+    w.add_child(toolbar)
+    w.add_child(panel)  # panel 仍然是上方，但在 toolbar 下方
+
     def on_layout(ctx):
         r = w.content_rect
-        panel_w = 320
-        scene.frame = gui.Rect(r.x, r.y, r.width - panel_w, r.height)
-        panel.frame = gui.Rect(r.get_right() - panel_w, r.y, panel_w, r.height)
+        em = w.theme.font_size
+
+        # 2) 工具栏固定高度，保证按钮永远可见
+        toolbar_h = int(2.4 * em)  # 一行刚好；想更紧凑可改 2.2*em
+        toolbar.frame = gui.Rect(r.x, r.y, r.width, toolbar_h)
+
+        # 3) 面板高度按窗口大小取一个“相对安全值”
+        #   - 最小 160，最多占窗口高度的 40%
+        panel_h = max(160, int(r.height * 0.40))
+        panel.frame = gui.Rect(r.x, r.y + toolbar_h, r.width, panel_h)
+
+        # 4) 场景占下面剩余空间
+        scene.frame = gui.Rect(r.x, r.y + toolbar_h + panel_h, r.width, r.height - toolbar_h - panel_h)
+
     w.set_on_layout(on_layout)
 
     app.run()

@@ -16,6 +16,17 @@ python ta_train.py -s ./dataset/soccer_ellipse -o ./output_seq/soccer_ellipse --
 Fast-12k（速度/质量平衡，推荐）
 python ta_train.py -s ./dataset/soccer_ellipse -o ./output_seq/soccer_ellipse --frames 1 -- --iterations 12000 -r 1 --sh_degree 3 --densify_from_iter 2000 --densify_until_iter 5000 --densification_interval 400 --densify_grad_threshold 7e-4 --opacity_reset_interval 8000 --depth_l1_weight_init 0 --depth_l1_weight_final 0 --test_iterations 999999 --save_iterations 999999 --disable_viewer
 
+python ta_train.py \
+  -s ./dataset/soccer_static_no_player_only_stadium \
+  -o ./output_seq \
+  --frames 1 \
+  -- \
+  --iterations 16000 -r 1 --lambda_dssim 0.2 \
+  --densify_from_iter 800 --densify_until_iter 9000 \
+  --densification_interval 120 \
+  --densify_grad_threshold 3e-4 \
+  --opacity_reset_interval 4000 \
+  --sh_degree 2 --disable_viewer
 
 
 gdown --folder --id 1pz-vQT-MbSNGM37t0sO0ZWuM9uZ1X1ry -O ./gdrive_folder --remaining-ok --continue
@@ -23,5 +34,28 @@ gdown --folder --id 1pz-vQT-MbSNGM37t0sO0ZWuM9uZ1X1ry -O ./gdrive_folder --remai
 zip -r output_seq.zip output_seq
 
 
-python pack/ta_pack.py -m ./output_seq --name soccer_ellipse_200000 --prefix model_frame_ --out ./output_seq_packed --autocreate
-python server/ta_server_slots.py -p .\output_seq_packed --prefix model_frame_ --slots 4  --warmup --neighbor_prefetch --camera_json ..\camera.json --port 7860
+python pack/ta_pack.py -m ./output_seq --name option1_stadium --prefix model_frame_ --out ./output_seq_packed --autocreate
+python server/ta_server_slots.py -p .\output_seq_packed\option1_stadium --prefix model_frame_ --slots 4  --warmup --neighbor_prefetch --camera_json ..\camera.json --port 7860
+
+python aabb_gui.py --pc ./dataset/soccer_static_no_player_only_stadium/frame_1/fused_points.ply --out aabb_B.json
+# 或带初始 AABB
+python aabb_gui.py --pc ./dataset/soccer_static_no_player_only_stadium/frame_1/fused_points.ply --init aabb_B.json --out aabb_B.json
+
+python train_b_only.py \
+  --source_path ./dataset/frame_n \
+  --model_path  ./output_seq/model_frame_n_Bonly \
+  --roi_b "-10,10, -10,10, 0.0,3.0" \
+  --iterations 1500 -r 1 \
+  --densify_from_iter 100 --densify_until_iter 900 \
+  --densification_interval 50 \
+  --densify_grad_threshold 3e-4 \
+  --opacity_reset_interval 2000 \
+  --sh_degree 3 --disable_viewer
+
+python merge_A_B.py \
+  --a_ply  ./output_seq/model_frame_0/point_cloud/iteration_24000/point_cloud.ply \
+  --b_ply  ./output_seq/model_frame_n_Bonly/point_cloud/iteration_1500/point_cloud.ply \
+  --out_ply ./output_seq/model_frame_n_merged/point_cloud/iteration_1500/point_cloud.ply
+
+
+
