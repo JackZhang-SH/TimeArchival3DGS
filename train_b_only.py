@@ -143,6 +143,7 @@ def training_b_only(dataset, opt, pipe,
     # === 初始化 ===
     tb = None
     gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
+    os.makedirs(dataset.model_path, exist_ok=True)
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
     gaussians.opts = opt

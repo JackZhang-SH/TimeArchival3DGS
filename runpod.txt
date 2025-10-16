@@ -33,13 +33,19 @@ pip install --no-build-isolation --no-cache-dir ./submodules/diff-gaussian-raste
 pip install --no-build-isolation --no-cache-dir ./submodules/simple-knn
 pip install --no-build-isolation --no-cache-dir ./submodules/fused-ssim
 
-gdown --folder --id 1kq6b26OoOSPZXPCZCCnqICCKOgX5sUvd -O ./dataset/ --remaining-ok --continue
+gdown --folder --id 1tyQwIbsc0tbc3mU5CkFfj8k5h1LIsaK3 -O ./dataset/ --remaining-ok --continue
 gdown --id 1lIADbGpZwkEuAuwOVuL-cVbtYGIKxmP4 -O ./dataset/ --remaining-ok --continue
 
 https://drive.google.com/file/d/1lIADbGpZwkEuAuwOVuL-cVbtYGIKxmP4/view?usp=drive_link
+https://drive.google.com/drive/folders/1tyQwIbsc0tbc3mU5CkFfj8k5h1LIsaK3?usp=drive_link
+
+scp -r -C -P 45082 root@141.193.30.39:/workspace/TimeArchival3DGS/output_seq ./output_seq
+scp -r -P 45082 ./dataset/soccer_ellipse_demo_test/frame_1 root@141.193.30.39:/workspace/TimeArchival3DGS/dataset
 
 
-scp -r -C -P 19152 root@185.216.20.89:/workspace/TimeArchival3DGS/output_seq ./output_seq
-scp -r -P 22119 ./dataset/soccer_ellipse_demo_test root@69.30.85.47:/workspace/TimeArchival3DGS/dataset
 
 
+# restart server
+bash miniconda.sh -b -p /workspace/miniconda3
+/workspace/miniconda3/bin/conda init bash
+conda activate TimeArchival3DGS
