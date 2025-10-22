@@ -11,7 +11,7 @@ python ta_train.py -s ./dataset/soccer_ellipse -o ./output_seq/soccer_ellipse --
 
 
 Aggressive-8k
-python ta_train.py -s ./dataset/soccer_ellipse -o ./output_seq/soccer_ellipse --frames 1 -- --iterations 8000 -r 1 --sh_degree 3 --densify_from_iter 2500 --densify_until_iter 4500 --densification_interval 600 --densify_grad_threshold 1e-3 --opacity_reset_interval 10000 --lambda_dssim 0.15 --depth_l1_weight_init 0 --depth_l1_weight_final 0 --test_iterations 999999 --save_iterations 999999 --disable_viewer
+python ta_train.py -s dataset\soccer_dynamic_player_B -o ./output_seq/soccer_dynamic_player_B --frames 1 -- --iterations 8000 -r 1 --sh_degree 3 --densify_from_iter 2500 --densify_until_iter 4500 --densification_interval 600 --densify_grad_threshold 1e-3 --opacity_reset_interval 10000 --lambda_dssim 0.15 --depth_l1_weight_init 0 --depth_l1_weight_final 0 --test_iterations 999999 --save_iterations 999999 --disable_viewer
 
 Fast-12k（速度/质量平衡，推荐）
 python ta_train.py -s ./dataset/soccer_ellipse -o ./output_seq/soccer_ellipse --frames 1 -- --iterations 12000 -r 1 --sh_degree 3 --densify_from_iter 2000 --densify_until_iter 5000 --densification_interval 400 --densify_grad_threshold 7e-4 --opacity_reset_interval 8000 --depth_l1_weight_init 0 --depth_l1_weight_final 0 --test_iterations 999999 --save_iterations 999999 --disable_viewer
@@ -29,48 +29,80 @@ python ta_train.py \
   --sh_degree 2 --disable_viewer
 
 
-gdown --folder --id 1pz-vQT-MbSNGM37t0sO0ZWuM9uZ1X1ry -O ./gdrive_folder --remaining-ok --continue
+gdown --id 1kq6b26OoOSPZXPCZCCnqICCKOgX5sUvd -O ./dataset --remaining-ok --continue
+gdown --folder --id 1kq6b26OoOSPZXPCZCCnqICCKOgX5sUvd -O ./gdrive_folder --remaining-ok --continue
+https://drive.google.com/file/d/1kq6b26OoOSPZXPCZCCnqICCKOgX5sUvd/view?usp=drive_link
+
 
 zip -r output_seq.zip output_seq
 
 
 python pack/ta_pack.py -m ./output_seq --name option1_stadium --prefix model_frame_ --out ./output_seq_packed --autocreate
+python pack/ta_pack.py -m ./output_seq  --name soccer_dynamic_player_aabb_only --prefix model_frame_ --out ./output_seq_packed --autocreate
+python pack\ta_pack.py `
+  --single_ply .\output_seq\merged\frame_1\point_cloud.ply `
+  --out_pt     .\output_seq_packed\merged\model_frame_1\iter_8000.pt `
+  --autocreate
+
 python server/ta_server_slots.py -p .\output_seq_packed\option1_stadium --prefix model_frame_ --slots 4  --warmup --neighbor_prefetch --camera_json ..\camera.json --port 7860
+python server/ta_server_slots.py -p .\output_seq_packed\soccer_dynamic_player_aabb_only --prefix model_frame_ --slots 4  --warmup --neighbor_prefetch --camera_json ..\camera.json --port 7860
+python server/ta_server_slots.py -p .\output_seq_packed\merged --prefix model_frame_ --slots 4  --warmup --neighbor_prefetch --camera_json ..\camera.json --port 7860
+
+
 
 python aabb_gui.py --pc ./dataset/soccer_static_no_player_only_stadium/frame_1/fused_points.ply --out aabb_B.json
 # 或带初始 AABB
 python aabb_gui.py --pc ./dataset/soccer_static_no_player_only_stadium/frame_1/fused_points.ply --init aabb_B.json --out aabb_B.json
 
-python train_b_only.py \
-  --source_path ./dataset/frame_n \
-  --model_path  ./output_seq/model_frame_n_Bonly \
-  --roi_b "-10,10, -10,10, 0.0,3.0" \
-  --iterations 1500 -r 1 \
-  --densify_from_iter 100 --densify_until_iter 900 \
-  --densification_interval 50 \
-  --densify_grad_threshold 3e-4 \
-  --opacity_reset_interval 2000 \
-  --sh_degree 3 --disable_viewer
+python .\ta_train_masked.py `
+  -s .\dataset\soccer_dynamic_player_B `
+  -o .\output_seq\soccer_dynamic_player_aabb_only `
+  --frames 1 `
+  --mask_mode aabb_only `
+  --aabb .\aabb_B.json `
+  --save_mask_png `
+  --aabb_close_px 2 --close_px 1 --dilate_px 1 `
+  -- `
+  --iterations 8000 -r 1 --sh_degree 3 `
+  --densify_from_iter 2500 --densify_until_iter 4500 `
+  --densification_interval 600 --densify_grad_threshold 1e-3 `
+  --opacity_reset_interval 10000 --lambda_dssim 0.15 `
+  --depth_l1_weight_init 0 --depth_l1_weight_final 0 `
+  --test_iterations 999999 --save_iterations 999999 --disable_viewer
+
+python .\merge_A_B.py `
+  --a_ply output_seq\static_stadium\model_frame_1\point_cloud\iteration_16000\point_cloud.ply `
+  --b_ply output_seq\soccer_dynamic_player_aabb_only\model_frame_1\point_cloud\iteration_8000\point_cloud.ply `
+  --aabb_json .\aabb_B.json `
+  --shrink_m 0.5 `
+  --feather_m 0.5 `
+  --out_ply .\output_seq\merged\frame_1\point_cloud.ply --cull_outside --cull_box shrunken
 
 
-python train_b_only.py \
-  --source_path ./dataset/frame_1 \
-  --model_path  ./output_bonly/model_frame_1 \
-  --roi_b_json ./aabb_B.json \
-  --mask_mode aabb \
-  --disable_viewer \
-  --iterations 12000 \
-  --densify_from_iter 500 --densify_until_iter 5000 \
-  --densification_interval 200 --densify_grad_threshold 5e-4 \
-  --opacity_reset_interval 3000 \
-  --lambda_dssim 0.2 \
-  --sh_degree 4
-
-
-python merge_A_B.py \
-  --a_ply  ./output_seq/model_frame_0/point_cloud/iteration_24000/point_cloud.ply \
-  --b_ply  ./output_seq/model_frame_n_Bonly/point_cloud/iteration_1500/point_cloud.ply \
-  --out_ply ./output_seq/model_frame_n_merged/point_cloud/iteration_1500/point_cloud.ply
-
-
+python .\make_residual_masks.py `
+  --gt_dir .\dataset\soccer_dynamic_player_B\frame_1\images `
+  --a_dir  .\dataset\soccer_static_no_player_only_stadium\frame_1\images `
+  --out_dir .\dataset\soccer_dynamic_player_B\frame_1\masks_residual `
+  --gt_ext .png `
+  --a_ext  .png `
+  --thr 25 `
+  --blur_px 0 `
+  --open_px 0 `
+  --close_px 1 `
+  --dilate_px 5
+python .\merge_A_B.py `
+  --a_ply .\output_seq\static_stadium\model_frame_1\point_cloud\iteration_16000\point_cloud.ply `
+  --b_ply .\output_seq\soccer_dynamic_player_aabb_only\model_frame_1\point_cloud\iteration_8000\point_cloud.ply `
+  --aabb_json .\aabb_B.json `
+  --shrink_m 0.0 `
+  --feather_m 0.0 `
+  --cull_outside --cull_box orig `
+  --keep_by_masks `
+  --colmap_dir dataset\soccer_dynamic_player_B\frame_1\sparse\0 `
+  --masks_dir  .\dataset\soccer_dynamic_player_B\frame_1\masks_residual `
+  --mask_ext .png `
+  --mask_dilate_px 0 `
+  --min_views 25 `
+  --subsample_cams 0 `
+  --out_ply .\output_seq\merged\frame_1\point_cloud_merged.ply
 

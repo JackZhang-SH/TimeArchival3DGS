@@ -12,6 +12,57 @@
 import numpy as np
 import collections
 import struct
+import os, json
+
+def _load_aabb_from_env():
+    jp = os.environ.get('AABB_JSON', None)
+    if not jp or not os.path.exists(jp):
+        return None, None
+    with open(jp, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+
+    def as_np(v): return np.array(v, dtype=float)
+
+    # --- Case 1: explicit min/max vectors (old format) ---
+    if 'min' in data and 'max' in data:
+        lo, hi = as_np(data['min']), as_np(data['max'])
+
+    # --- Case 2: center + size/extent/half_size (old format) ---
+    elif 'center' in data and ('size' in data or 'extent' in data or 'half_size' in data):
+        c = as_np(data['center'])
+        if 'size' in data:
+            s = as_np(data['size']); lo, hi = c - 0.5 * s, c + 0.5 * s
+        elif 'extent' in data:
+            s = as_np(data['extent']); lo, hi = c - 0.5 * s, c + 0.5 * s
+        else:
+            hs = as_np(data['half_size']); lo, hi = c - hs, c + hs
+
+    # --- Case 3: scalar bounds (your new format) ---
+    elif all(k in data for k in ('xmin','xmax','ymin','ymax','zmin','zmax')):
+        lo = np.array([float(data['xmin']), float(data['ymin']), float(data['zmin'])], dtype=float)
+        hi = np.array([float(data['xmax']), float(data['ymax']), float(data['zmax'])], dtype=float)
+
+    # --- Case 3b: tolerate upper/lower case or alt spellings ---
+    elif all(k in {kk.lower() for kk in data.keys()} for k in ('xmin','xmax','ymin','ymax','zmin','zmax')):
+        d = {k.lower(): v for k, v in data.items()}
+        lo = np.array([float(d['xmin']), float(d['ymin']), float(d['zmin'])], dtype=float)
+        hi = np.array([float(d['xmax']), float(d['ymax']), float(d['zmax'])], dtype=float)
+
+    else:
+        return None, None
+
+    lo, hi = np.minimum(lo, hi), np.maximum(lo, hi)
+    return lo, hi
+
+
+def _apply_aabb_filter(xyzs, rgbs, errors):
+    lo, hi = _load_aabb_from_env()
+    if lo is None:  # 没有设置，不裁剪
+        return xyzs, rgbs, errors
+    keep = np.all((xyzs >= lo) & (xyzs <= hi), axis=1)
+    if keep.sum() == 0:
+        return xyzs[:0], rgbs[:0], errors[:0]
+    return xyzs[keep], rgbs[keep], errors[keep]
 
 CameraModel = collections.namedtuple(
     "CameraModel", ["model_id", "model_name", "num_params"])
@@ -119,8 +170,9 @@ def read_points3D_text(path):
                 rgbs[count] = rgb
                 errors[count] = error
                 count += 1
-
+    xyzs, rgbs, errors = _apply_aabb_filter(xyzs, rgbs, errors)
     return xyzs, rgbs, errors
+
 
 def read_points3D_binary(path_to_model_file):
     """
@@ -151,6 +203,7 @@ def read_points3D_binary(path_to_model_file):
             xyzs[p_id] = xyz
             rgbs[p_id] = rgb
             errors[p_id] = error
+    xyzs, rgbs, errors = _apply_aabb_filter(xyzs, rgbs, errors)
     return xyzs, rgbs, errors
 
 def read_intrinsics_text(path):

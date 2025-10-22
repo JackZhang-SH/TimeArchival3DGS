@@ -202,19 +202,34 @@ def readColmapSceneInfo(path, images, depths, eval, train_test_exp, llffhold=8):
 
     nerf_normalization = getNerfppNorm(train_cam_infos)
 
-    ply_path = os.path.join(path, "sparse/0/points3D.ply")
+    default_ply_path = os.path.join(path, "sparse/0/points3D.ply")
     bin_path = os.path.join(path, "sparse/0/points3D.bin")
     txt_path = os.path.join(path, "sparse/0/points3D.txt")
-    if not os.path.exists(ply_path):
-        print("Converting point3d.bin to .ply, will happen only the first time you open the scene.")
+    # 如果设置了 AABB_JSON，则强制重建一个“被裁剪”的 ply，并优先使用它
+    aabb_json = os.environ.get("AABB_JSON", None)
+    if aabb_json:
+        ply_path = os.path.join(path, "sparse/0/points3D__aabb.ply")
+        # 总是重建：确保应用最新的 AABB 过滤
         try:
             xyz, rgb, _ = read_points3D_binary(bin_path)
-        except:
+        except Exception:
             xyz, rgb, _ = read_points3D_text(txt_path)
+        # 这里的 read_points3D_* 已经在 colmap_loader 里应用了 _apply_aabb_filter
         storePly(ply_path, xyz, rgb)
+        print(f"[AABB] kept {xyz.shape[0]} points -> {ply_path}")
+    else:
+        ply_path = default_ply_path
+        if not os.path.exists(ply_path):
+            print("Converting point3d.bin to .ply, will happen only the first time you open the scene.")
+            try:
+                xyz, rgb, _ = read_points3D_binary(bin_path)
+            except Exception:
+                xyz, rgb, _ = read_points3D_text(txt_path)
+            storePly(ply_path, xyz, rgb)
+
     try:
         pcd = fetchPly(ply_path)
-    except:
+    except Exception:
         pcd = None
 
     scene_info = SceneInfo(point_cloud=pcd,

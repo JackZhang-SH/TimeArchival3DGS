@@ -169,14 +169,47 @@ def pack_one_frame(ply_path: Path, out_path: Path):
 
 def main():
     ap = argparse.ArgumentParser("Pack 3DGS frames to .pt")
-    ap.add_argument("-m","--models_root", required=True, type=str, help="root folder that may contain dataset subfolders")
+    # --- 新增：单文件模式 ---
+    ap.add_argument("--single_ply", type=str, default=None,
+                    help="直接打包这一个 PLY（跳过 models_root/frames 扫描）")
+    ap.add_argument("--out_pt", type=str, default=None,
+                    help="单文件模式下输出的 .pt 完整路径；若未提供则需 --frame 与 --iter 来构造路径")
+    ap.add_argument("--frame", type=int, default=1,
+                    help="单文件模式下用于构造输出路径的帧号（与 --prefix 组合）")
+    ap.add_argument("--iter", type=int, default=8000,
+                    help="单文件模式下用于构造输出路径的迭代号（生成 iter_xxxx.pt）")
+
+    # --- 目录模式（原有逻辑） ---
+    ap.add_argument("-m","--models_root", required=False, type=str,
+                    help="root folder that may contain dataset subfolders")
     ap.add_argument("--name","--dataset", dest="dataset", default=None, type=str, help="dataset name, e.g., 'soccer'")
     ap.add_argument("--prefix", default="model_frame_", type=str)
-    ap.add_argument("--out", required=True, type=str, help="packed root (dataset subfolder will be appended if --name is provided)")
+    ap.add_argument("--out", required=False, type=str,
+                    help="打包根目录（目录模式必需；单文件模式若未给 --out_pt 也需要）")
     ap.add_argument("--autocreate", action="store_true")
     args = ap.parse_args()
-
+    # -------- 单文件模式：直接把 --single_ply 打成 .pt --------
+    if args.single_ply:
+        ply_path = Path(args.single_ply)
+        if not ply_path.exists():
+            raise SystemExit(f"[ta_pack] single_ply not found: {ply_path}")
+        # 解析输出路径
+        if args.out_pt:
+            out_path = Path(args.out_pt)
+        else:
+            if not args.out:
+                raise SystemExit("[ta_pack] need --out or --out_pt in single-file mode")
+            out_root = Path(args.out)
+            out_path = out_root / f"{args.prefix}{args.frame}" / f"iter_{args.iter}.pt"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        print(f"[ta_pack] single-file mode")
+        print(f"[ta_pack]  ply : {ply_path}")
+        print(f"[ta_pack]  out : {out_path}")
+        pack_one_frame(ply_path, out_path)
+        return
     # resolve input/output with optional dataset name
+    if not args.models_root or not args.out:
+        raise SystemExit("[ta_pack] directory mode requires --models_root and --out (no --single_ply).")
     models_base = Path(args.models_root)
     out_base = Path(args.out)
     if args.dataset:
