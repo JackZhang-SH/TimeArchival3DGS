@@ -62,9 +62,7 @@ def load_render_backend_or_die():
             f"原始异常：{repr(e)}\n"
         ) from e
 
-# -----------------------------------------------------------------------------
-# 3) Pipeline（兼容多版本）+ 缺字段自愈
-# -----------------------------------------------------------------------------
+
 _PIPELINE_DEFAULTS = {
     "convert_SHs_python":   False,
     "compute_cov3D_python": False,
