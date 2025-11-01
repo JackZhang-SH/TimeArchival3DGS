@@ -9,6 +9,10 @@ python ta_render.py -m ./output_seq/soccer_ellipse -o ./renders_cam_colmap --col
 
 python ta_train.py -s ./dataset/soccer_ellipse -o ./output_seq/soccer_ellipse --frames 1 -- --disable_viewer -r 2 --densify_from_iter 1500 --densify_until_iter 5000 --densification_interval 200 --densify_grad_threshold 5e-4 --percent_dense 0.005 --opacity_reset_interval 6000 --iterations 15000
 
+python render.py -m .\output_seq\soccer_dynamic_player
+python render.py -m output_seq\soccer_dynamic_player_masked\model_frame_1
+python train.py -s dataset\soccer_dynamic_player_B\frame_1 -o .\output_seq\soccer_dynamic_player_aabb_only --disable_viewer --optimizer_type sparse_adam
+
 
 Aggressive-8k
 python ta_train.py -s dataset\soccer_dynamic_player_B -o ./output_seq/soccer_dynamic_player_B --frames 1 -- --iterations 8000 -r 1 --sh_degree 3 --densify_from_iter 2500 --densify_until_iter 4500 --densification_interval 600 --densify_grad_threshold 1e-3 --opacity_reset_interval 10000 --lambda_dssim 0.15 --depth_l1_weight_init 0 --depth_l1_weight_final 0 --test_iterations 999999 --save_iterations 999999 --disable_viewer
@@ -38,17 +42,19 @@ zip -r output_seq.zip output_seq
 
 
 python pack/ta_pack.py -m ./output_seq --name option1_stadium --prefix model_frame_ --out ./output_seq_packed --autocreate
-python pack/ta_pack.py -m ./output_seq  --name soccer_dynamic_player_aabb_only --prefix model_frame_ --out ./output_seq_packed --autocreate
+python pack/ta_pack.py -m ./output_seq  --name soccer_dynamic_player_masked --prefix model_frame_ --out ./output_seq_packed --autocreate
 python pack\ta_pack.py `
   --single_ply .\output_seq\merged\frame_1\point_cloud.ply `
   --out_pt     .\output_seq_packed\merged\model_frame_1\iter_8000.pt `
   --autocreate
+python pack\pack.py --model output_seq\soccer_dynamic_player_original_train --out_pt output_seq_packed\soccer_dynamic_player_original_train\iter_8000.pt
+
 
 python server/ta_server_slots.py -p .\output_seq_packed\option1_stadium --prefix model_frame_ --slots 4  --warmup --neighbor_prefetch --camera_json ..\camera.json --port 7860
 python server/ta_server_slots.py -p .\output_seq_packed\soccer_dynamic_player_aabb_only --prefix model_frame_ --slots 4  --warmup --neighbor_prefetch --camera_json ..\camera.json --port 7860
 python server/ta_server_slots.py -p .\output_seq_packed\merged --prefix model_frame_ --slots 4  --warmup --neighbor_prefetch --camera_json ..\camera.json --port 7860
-
-
+python server/ta_server_slots.py -p .\output_seq_packed\soccer_dynamic_player_masked --prefix model_frame_ --slots 4  --warmup --neighbor_prefetch --camera_json ..\camera.json --port 7860
+python server/ta_server_slots.py -p .\output_seq_packed\soccer_dynamic_player_original_train --prefix model_frame_ --slots 4  --warmup --neighbor_prefetch --camera_json ..\camera.json --port 7860
 
 python aabb_gui.py --pc ./dataset/soccer_static_no_player_only_stadium/frame_1/fused_points.ply --out aabb_B.json
 # 或带初始 AABB
@@ -56,7 +62,7 @@ python aabb_gui.py --pc ./dataset/soccer_static_no_player_only_stadium/frame_1/f
 
 python .\ta_train_masked.py `
   -s .\dataset\soccer_dynamic_player_B `
-  -o .\output_seq\soccer_dynamic_player_aabb_only `
+  -o .\output_seq\soccer_dynamic_player_masked `
   --frames 1 `
   --mask_mode aabb_only `
   --aabb .\aabb_B.json `
@@ -68,16 +74,23 @@ python .\ta_train_masked.py `
   --densification_interval 600 --densify_grad_threshold 1e-3 `
   --opacity_reset_interval 10000 --lambda_dssim 0.15 `
   --depth_l1_weight_init 0 --depth_l1_weight_final 0 `
-  --test_iterations 999999 --save_iterations 999999 --disable_viewer
+  --test_iterations 999999 --save_iterations 999999 --disable_viewer --optimizer_type sparse_adam
 
-python .\merge_A_B.py `
-  --a_ply output_seq\static_stadium\model_frame_1\point_cloud\iteration_16000\point_cloud.ply `
-  --b_ply output_seq\soccer_dynamic_player_aabb_only\model_frame_1\point_cloud\iteration_8000\point_cloud.ply `
-  --aabb_json .\aabb_B.json `
-  --shrink_m 0.5 `
-  --feather_m 0.5 `
-  --out_ply .\output_seq\merged\frame_1\point_cloud.ply --cull_outside --cull_box shrunken
-
+python .\ta_train_masked_tightcrop.py `
+  -s .\dataset\soccer_dynamic_player_B `
+  -o .\output_seq\soccer_dynamic_player_masked `
+  --frames 1 `
+  --mask_mode aabb_only `
+  --aabb .\aabb_B.json `
+  --save_mask_png `
+  --aabb_close_px 2 --close_px 1 --dilate_px 1 --tight_crop `
+  -- `
+  --iterations 8000 -r 1 --sh_degree 3 `
+  --densify_from_iter 2500 --densify_until_iter 4500 `
+  --densification_interval 600 --densify_grad_threshold 1e-3 `
+  --opacity_reset_interval 10000 --lambda_dssim 0.15 `
+  --depth_l1_weight_init 0 --depth_l1_weight_final 0 `
+  --test_iterations 999999 --save_iterations 999999 --disable_viewer --optimizer_type sparse_adam
 
 python .\make_residual_masks.py `
   --gt_dir .\dataset\soccer_dynamic_player_B\frame_1\images `
@@ -90,6 +103,7 @@ python .\make_residual_masks.py `
   --open_px 0 `
   --close_px 1 `
   --dilate_px 5
+
 python .\merge_A_B.py `
   --a_ply .\output_seq\static_stadium\model_frame_1\point_cloud\iteration_16000\point_cloud.ply `
   --b_ply .\output_seq\soccer_dynamic_player_aabb_only\model_frame_1\point_cloud\iteration_8000\point_cloud.ply `
@@ -106,3 +120,23 @@ python .\merge_A_B.py `
   --subsample_cams 0 `
   --out_ply .\output_seq\merged\frame_1\point_cloud_merged.ply
 
+python .\merge_A_B.py `
+  --a_ply .\output_seq\static_stadium\model_frame_1\point_cloud\iteration_16000\point_cloud.ply `
+  --b_ply .\output_seq\soccer_dynamic_player_masked\model_frame_1\point_cloud\iteration_8000\point_cloud.ply `
+  --aabb_json .\aabb_B.json `
+  --shrink_m 0.0 `
+  --feather_m 0.0 `
+  --cull_outside --cull_box orig `
+  --keep_by_masks `
+  --colmap_dir dataset\soccer_dynamic_player_B\frame_1\sparse\0 `
+  --masks_dir  .\dataset\soccer_dynamic_player_B\frame_1\masks_residual `
+  --mask_ext .png `
+  --mask_dilate_px 0 `
+  --min_views 25 `
+  --subsample_cams 0 `
+  --out_ply .\output_seq\merged\frame_1\point_cloud_merged.ply
+python pack\ta_pack.py `
+  --single_ply .\output_seq\merged\frame_1\point_cloud_merged.ply `
+  --out_pt     .\output_seq_packed\merged\model_frame_1\iter_8000.pt `
+  --autocreate
+python server/ta_server_slots.py -p .\output_seq_packed\merged --prefix model_frame_ --slots 4  --warmup --neighbor_prefetch --camera_json ..\camera.json --port 7860

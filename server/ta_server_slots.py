@@ -69,7 +69,7 @@ _PIPELINE_DEFAULTS = {
     "convert_SHs_python":   False,
     "compute_cov3D_python": False,
     "compute_cov2D_python": False,
-    "antialiasing":         True,
+    "antialiasing":         False,
     "sh_degree":            3,
     "debug":                False,
 }
@@ -377,7 +377,9 @@ def create_app(packed_root: Path, prefix: str, slots: int, jpeg_quality: int,
     sm = SlotManager(slots, cpu_cache.N_max, cpu_cache.L, device="cuda")
 
     default_pipe = make_default_pipeline()
-
+    default_pipe.antialiasing = False          # 关键：关闭 AA，显存峰值立刻大幅下降
+    default_pipe.compute_cov2D_python = True   # 让 2D 协方差走 PyTorch 路径，减少扩展工作区
+    default_pipe.convert_SHs_python = True     # 同理（通常对速度影响很小）
     def _scale_cam_intrinsics(cam_dict, new_w, new_h):
         sw = new_w / float(cam_dict["width"]); sh = new_h / float(cam_dict["height"])
         cd = dict(cam_dict)

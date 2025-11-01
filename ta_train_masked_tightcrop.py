@@ -1,34 +1,44 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Time Archival 3DGS — Mask-then-Train Orchestrator
-=================================================
+Time Archival 3DGS — Mask-then-Train Orchestrator (with optional tight crop)
+============================================================================
 
-Batch runner that, for each COLMAP dataset under a source root (frame_*),
-1) builds foreground masks using one of two strategies:
-   - aabb_only      → uses ray–box (AABB) projection only (no depth).
-   - from_B_only    → uses B point cloud splatting (constant or adaptive radius).
-   The first time masks are computed for a frame, they are cached and reused.
-2) constructs a *working* dataset with masked images (no modification to the
-   original dataset) so that training consumes already-masked GT.
-3) calls the stock train.py (same as ta_train) for each frame, in isolation.
+This is a drop-in replacement for ta_train_masked.py that adds two optional flags:
+  --tight_crop        : When set, each masked GT is cropped to its tight ROI.
+  --pad_px N          : Padding (in pixels) around the tight ROI when cropping (default: 2).
 
-Why build a working dataset?
-----------------------------
-- It guarantees train.py uses masked images regardless of internal alpha-mask
-  conventions. We rewrite images.txt to point to the copied PNG masks.
+Default behavior (no --tight_crop) remains 100% compatible with your current pipeline:
+- We still build a working dataset with masked PNGs and unmodified camera intrinsics.
 
-Outputs (per frame_i):
-- <work_root>/frame_i_work/ : COLMAP structure with PNG masked images + patched images.txt
-- <mask_cache_root>/frame_i/<mode>/ : cached masks/masked_gt/*.png + masks_raw/*.npy
-- Model: <output_root>/<prefix><i>[/per-frame-subdir]
+When --tight_crop is enabled:
+- We compute each image's tight ROI from masks_raw/<stem>.npy and crop the masked PNG.
+- We duplicate the corresponding camera in cameras.txt, shifting cx,cy by the crop offset
+  and updating W,H to the new dimensions.
+- We rewrite images.txt to point to the cropped PNG and the new camera id.
+- We also crop masks_raw to keep train.py's --masked ROI loss working in the smaller image.
 
-Usage Example (PowerShell): see the message body in ChatGPT.
+Usage Example (PowerShell):
+---------------------------
+python .\\ta_train_masked_tightcrop.py `
+  -s .\\dataset\\soccer_dynamic_player_B `
+  -o .\\output_seq\\soccer_dynamic_player_aabb_only `
+  --frames 1 `
+  --mask_mode aabb_only `
+  --aabb .\\aabb_B.json `
+  --save_mask_png `
+  --aabb_close_px 2 --close_px 1 --dilate_px 1 `
+  --tight_crop --pad_px 2 `
+  -- `
+  --iterations 8000 -r 1 --sh_degree 3 `
+  --densify_from_iter 2500 --densify_until_iter 4500 `
+  --densification_interval 600 --densify_grad_threshold 1e-3 `
+  --opacity_reset_interval 10000 --lambda_dssim 0.15 `
+  --masked --disable_viewer
 """
 
 from __future__ import annotations
 import argparse
-import json
 import os
 import shutil
 import subprocess
@@ -37,53 +47,67 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Tuple
 
-# ---------- tiny COLMAP text readers (same as in your scripts) ----------
-import re
 import numpy as np
+from PIL import Image
+import re
 
-def read_cameras_text(path: Path):
+# ---------- tiny COLMAP text readers ----------
+
+def read_cameras_text_with_lines(path: Path):
+    """
+    Return (lines, cams) where:
+      - lines: original file lines (list[str])
+      - cams : dict[id] = (model, w, h, params(list[float]), line_index)
+    """
     cams = {}
     with open(path, 'r', encoding='utf-8') as f:
-        for ln in f:
-            if not ln.strip() or ln.startswith('#'): continue
-            toks = ln.split()
-            cam_id = int(toks[0]); model = toks[1]
-            w, h = int(toks[2]), int(toks[3])
-            params = list(map(float, toks[4:]))
-            cams[cam_id] = (model, w, h, params)
-    return cams
+        lines = f.readlines()
+    for i, ln in enumerate(lines):
+        s = ln.strip()
+        if (not s) or s.startswith('#'):
+            continue
+        toks = s.split()
+        cam_id = int(toks[0]); model = toks[1]
+        w, h = int(toks[2]), int(toks[3])
+        params = list(map(float, toks[4:]))
+        cams[cam_id] = (model, w, h, params, i)
+    return lines, cams
 
 
 def read_images_text(path: Path):
-    recs = []  # list of (line_idx, parsed_dict)
+    """
+    Parse COLMAP images.txt returning (lines, records).
+    Each record is a dict with: line_index, img_id, camera_id, name.
+
+    We only need the image header lines (not the 3D point lines).
+    """
+    recs = []
     with open(path, 'r', encoding='utf-8') as f:
         lines = f.readlines()
     i = 0
     while i < len(lines):
-        line = lines[i].strip()
-        if not line or line.startswith('#'):
+        s = lines[i].strip()
+        if not s or s.startswith('#'):
             i += 1; continue
-        toks = line.split()
+        toks = s.split()
         if len(toks) < 10:
             i += 1; continue
         img_id = int(toks[0])
-        # q(4), t(3), cam_id, name
         recs.append({
             'line_index': i,
             'img_id': img_id,
-            'qvec': list(map(float, toks[1:5])),
-            'tvec': list(map(float, toks[5:8])),
             'camera_id': int(toks[8]),
             'name': toks[9]
         })
-        i += 2  # skip point lines
+        i += 2  # skip the following 3D points line
     return lines, recs
 
-_digit_re = re.compile(r"^\d+$")
 
+_digit_re = re.compile(r"^\d+$")
 def idx_str_for(name: str, img_id: int) -> str:
     stem = Path(name).stem
     return stem if _digit_re.match(stem) else f"{img_id:04d}"
+
 
 # ---------- core helpers ----------
 
@@ -93,15 +117,12 @@ def ensure_dir(p: Path):
 
 
 def masks_already_cached(cache_dir: Path) -> bool:
-    # consider cached if masked_gt has at least 1 png
     mg = cache_dir / 'masked_gt'
     if not mg.exists():
-        # older naming in B-only script
         mg = cache_dir / 'masked_gt_Bonly'
     if not mg.exists():
         return False
-    pngs = list(mg.glob('*.png'))
-    return len(pngs) > 0
+    return any(mg.glob('*.png'))
 
 
 def run_mask_step(mode: str, frame_dir: Path, aabb_json: Path, pc_name: str,
@@ -109,7 +130,6 @@ def run_mask_step(mode: str, frame_dir: Path, aabb_json: Path, pc_name: str,
     """Dispatch to masking script. Returns the cache_dir actually used."""
     ensure_dir(cache_dir)
     if mode == 'aabb_only':
-        # make_mask_aabb_only.py --aabb AABB --colmap frame_dir --out cache_dir ...
         cmd = [sys.executable, '-u', 'make_mask_aabb_only.py',
                '--aabb', str(aabb_json),
                '--colmap', str(frame_dir),
@@ -131,15 +151,13 @@ def run_mask_step(mode: str, frame_dir: Path, aabb_json: Path, pc_name: str,
     return cache_dir
 
 
-def build_work_dataset(frame_dir: Path, cache_dir: Path, work_dir: Path) -> None:
+def build_work_dataset(frame_dir: Path, cache_dir: Path, work_dir: Path,
+                       tight_crop: bool=False, pad_px: int=2) -> None:
     """
-    Copy sparse/ to work_dir, and create images/ filled with PNG masked images.
-    Also rewrite images.txt so that each image line points to the PNG we created.
-    We map each images.txt entry to the mask filename produced by masking
-    scripts (idx_str.png). If B-only script was used, it stores under
-    masked_gt_Bonly/; AABB-only under masked_gt/.
+    Clone sparse/ → work_dir, fill images/ with masked/cropped PNG,
+    rewrite images.txt; optionally duplicate cameras with tight crop updates.
     """
-    # 1) clone sparse — preserve "0" level if it exists, because train.py expects sparse/0/*
+    # 1) locate source sparse tree
     src_sparse0 = frame_dir / 'sparse' / '0'
     has_level0 = src_sparse0.exists()
     if has_level0:
@@ -152,26 +170,52 @@ def build_work_dataset(frame_dir: Path, cache_dir: Path, work_dir: Path) -> None
     if not src_sparse.exists():
         raise FileNotFoundError(f"Missing sparse/ in {frame_dir}")
 
-    # copy the chosen source tree into the corresponding destination
     shutil.copytree(src_sparse, dst_sparse_root, dirs_exist_ok=True)
 
-    # 2) decide masked_gt folder name
+    # 2) resolve masked_gt and masks_raw
     mg = cache_dir / 'masked_gt'
     if not mg.exists():
         mg = cache_dir / 'masked_gt_Bonly'
     if not mg.exists():
         raise FileNotFoundError(f"No masked_gt found in {cache_dir}")
-    # 找到原始像素掩码目录（可选存在）
     masks_raw = cache_dir / 'masks_raw'
-    out_masks_raw = ensure_dir(work_dir / 'masks_raw')
-    # 3) read images.txt and patch names → copy pngs
+
+    # 3) read/prepare images & cameras
     images_txt_path = dst_sparse_root / 'images.txt'
+    cams_txt_path = dst_sparse_root / 'cameras.txt'
     lines, recs = read_images_text(images_txt_path)
+    cams_lines, cams = read_cameras_text_with_lines(cams_txt_path)
+    next_cam_id = (max(cams.keys()) + 1) if len(cams) else 1
+
     out_images = ensure_dir(work_dir / 'images')
+    out_masks_raw = ensure_dir(work_dir / 'masks_raw')
+
+    def _shift_cxcy(model: str, params: List[float], dx: float, dy: float) -> List[float]:
+        p = params.copy()
+        # Model schemas (COLMAP):
+        # SIMPLE_PINHOLE: [f, cx, cy]
+        # PINHOLE      : [fx, fy, cx, cy]
+        # SIMPLE_RADIAL: [f, cx, cy, k]
+        # RADIAL       : [f, cx, cy, k1, k2]
+        # OPENCV       : [fx, fy, cx, cy, k1, k2, p1, p2]
+        if model == 'SIMPLE_PINHOLE':
+            p[1] -= dx; p[2] -= dy
+        elif model == 'PINHOLE':
+            p[2] -= dx; p[3] -= dy
+        elif model == 'SIMPLE_RADIAL':
+            p[1] -= dx; p[2] -= dy
+        elif model == 'RADIAL':
+            p[1] -= dx; p[2] -= dy
+        elif model == 'OPENCV':
+            p[2] -= dx; p[3] -= dy
+        # Unknown models: keep as-is (safe fallback).
+        return p
 
     for rec in recs:
         img_id = rec['img_id']
         orig_name = rec['name']
+        cam_id = rec['camera_id']
+
         out_png_name = idx_str_for(orig_name, img_id) + '.png'
         src_png = mg / out_png_name
         if not src_png.exists():
@@ -180,20 +224,74 @@ def build_work_dataset(frame_dir: Path, cache_dir: Path, work_dir: Path) -> None
                 src_png = alt
             else:
                 raise FileNotFoundError(f"Masked PNG not found for {orig_name} at {src_png}")
-        shutil.copy2(src_png, out_images / out_png_name)
-        # patch the image line's name token to png
+
+        # Default path if not cropping
+        dst_png_path = out_images / out_png_name
+
+        # Patch images.txt line to point to PNG filename
         li = rec['line_index']
         toks = lines[li].split()
-        toks[9] = out_png_name
-        lines[li] = ' '.join(toks) + '\n'
+        toks[9] = out_png_name  # filename
+
+        # Handle mask npy
         src_npy = masks_raw / (Path(out_png_name).stem + '.npy')
-        if src_npy.exists():
-            shutil.copy2(src_npy, out_masks_raw / src_npy.name)
-    # 4) write patched images.txt
+        y0=y1=x0=x1=None  # ROI for this image
+
+        if tight_crop and src_npy.exists():
+            mask_np = np.load(str(src_npy))
+            if mask_np.dtype != np.uint8 and mask_np.dtype != np.bool_:
+                mask_np = (mask_np > 0).astype(np.uint8)
+            ys, xs = np.nonzero(mask_np)
+            if ys.size > 0 and xs.size > 0:
+                # Read original size from PNG
+                with Image.open(src_png) as im_tmp:
+                    W0, H0 = im_tmp.size  # PIL returns (W, H)
+                y0, y1 = int(ys.min()), int(ys.max()) + 1
+                x0, x1 = int(xs.min()), int(xs.max()) + 1
+                if pad_px > 0:
+                    y0 = max(0, y0 - pad_px); x0 = max(0, x0 - pad_px)
+                    y1 = min(H0, y1 + pad_px); x1 = min(W0, x1 + pad_px)
+                # Crop and save PNG
+                with Image.open(src_png) as im:
+                    im_c = im.crop((x0, y0, x1, y1))
+                    im_c.save(dst_png_path)
+                # Crop and save mask npy (uint8 {0,1})
+                mask_crop = (mask_np[y0:y1, x0:x1] > 0).astype(np.uint8)
+                np.save(str(out_masks_raw / (Path(out_png_name).stem + '.npy')), mask_crop)
+
+                # Duplicate camera with shifted cx,cy and new W,H
+                if cam_id not in cams:
+                    raise KeyError(f"camera_id {cam_id} not found in cameras.txt")
+                model, Worig, Horig, params, _ = cams[cam_id]
+                newW = int(x1 - x0)
+                newH = int(y1 - y0)
+                new_params = _shift_cxcy(model, params, dx=float(x0), dy=float(y0))
+                new_cam_id = next_cam_id; next_cam_id += 1
+                cams_lines.append(
+                    f"{new_cam_id} {model} {newW} {newH} " + " ".join(f"{v:.6f}" for v in new_params) + "\n"
+                )
+
+                toks[8] = str(new_cam_id)  # switch to new camera
+            else:
+                # No positive mask; fall back to copy-as-is
+                shutil.copy2(src_png, dst_png_path)
+                if src_npy.exists():
+                    shutil.copy2(src_npy, out_masks_raw / src_npy.name)
+        else:
+            # Not cropping → copy as-is
+            shutil.copy2(src_png, dst_png_path)
+            if src_npy.exists():
+                shutil.copy2(src_npy, out_masks_raw / src_npy.name)
+
+        # Write back images.txt header line
+        lines[li] = ' '.join(toks) + '\n'
+
+
+    # Persist updated text files
     with open(images_txt_path, 'w', encoding='utf-8') as f:
         f.writelines(lines)
-
-    # 5) cameras.txt and points3D.txt remain the same; no need to touch
+    with open(cams_txt_path, 'w', encoding='utf-8') as f:
+        f.writelines(cams_lines)
 
 
 @dataclass
@@ -205,7 +303,7 @@ class FramePlan:
     model_dir: Path
 
 
-# ---------- main ----------
+# ---------- CLI ----------
 
 def parse_frames(frames_expr: str, dataset_root: Path) -> List[int]:
     def scan_all() -> List[int]:
@@ -220,7 +318,7 @@ def parse_frames(frames_expr: str, dataset_root: Path) -> List[int]:
     s = frames_expr.strip().lower()
     if s == 'all':
         return scan_all()
-    if s == 'even' or s == 'odd':
+    if s in ('even', 'odd'):
         all_frames = scan_all()
         return [i for i in all_frames if (i % 2 == 0) == (s == 'even')]
     if s.startswith('frame_'):
@@ -233,7 +331,7 @@ def parse_frames(frames_expr: str, dataset_root: Path) -> List[int]:
 
 
 def main(argv: List[str] | None = None) -> None:
-    ap = argparse.ArgumentParser(description='Mask-then-Train batch runner')
+    ap = argparse.ArgumentParser(description='Mask-then-Train batch runner (tight-crop optional)')
     ap.add_argument('-s', '--source_root', required=True, help='Root with frame_* COLMAP datasets')
     ap.add_argument('-o', '--output_root', required=True, help='Root for model outputs')
     ap.add_argument('--frames', default='all', help='e.g., "all" | "1-10" | "1,5" | "frame_3"')
@@ -259,6 +357,10 @@ def main(argv: List[str] | None = None) -> None:
     ap.add_argument('--splat_px_min', type=int, default=1)
     ap.add_argument('--splat_px_max', type=int, default=6)
     ap.add_argument('--splat_radius_px', type=int, default=1)
+
+    # NEW: tight-crop controls
+    ap.add_argument('--tight_crop', action='store_true', help='Crop masked PNGs to tight ROI and duplicate cameras with shifted cx,cy')
+    ap.add_argument('--pad_px', type=int, default=2, help='Padding around tight ROI when --tight_crop is on')
 
     # sentinel to split args to train.py
     ap.add_argument('--', dest='dashdash', action='store_true', help=argparse.SUPPRESS)
@@ -300,11 +402,10 @@ def main(argv: List[str] | None = None) -> None:
         ensure_dir(model_dir)
         plans.append(FramePlan(i, fdir, cache_dir, work_dir, model_dir))
 
-    # Per-frame pipeline
     aabb_json = Path(args.aabb).resolve()
 
     for p in plans:
-        print(f"\n==== [frame_{p.frame}] ====")
+        print(f"\\n==== [frame_{p.frame}] ====")
         if args.resume_if_exists and (p.model_dir / 'chkpnt').exists():
             print('[resume-skip] trained artifacts exist ->', p.model_dir)
             continue
@@ -328,19 +429,20 @@ def main(argv: List[str] | None = None) -> None:
 
             run_mask_step(args.mask_mode, p.src_dir, aabb_json, args.pc_name, p.cache_dir, mask_flags)
 
-        # 2) Build working dataset
+        # 2) Build working dataset (with or without cropping)
         if p.work_dir.exists() and any((p.work_dir / 'images').glob('*.png')):
             print('[work] reuse existing working dataset at', p.work_dir)
         else:
             if p.work_dir.exists():
                 shutil.rmtree(p.work_dir)
             ensure_dir(p.work_dir)
-            build_work_dataset(p.src_dir, p.cache_dir, p.work_dir)
-        # 若外层启用 --masked，则透传给 train.py
+            build_work_dataset(p.src_dir, p.cache_dir, p.work_dir, tight_crop=args.tight_crop, pad_px=args.pad_px)
+
+        # 3) Forward --masked flag if requested
         if args.masked and ('--masked' not in train_flags):
             train_flags = train_flags + ['--masked']
-        # 3) Train
-        # 训练阶段不再传 mask/prune 类参数，改为仅用工作数据集 + 环境变量 AABB_JSON
+
+        # 4) Train on the working dataset
         cmd = [sys.executable, '-u', 'train.py',
                '--source_path', str(p.work_dir),
                '--model_path', str(p.model_dir)] + train_flags
@@ -350,9 +452,7 @@ def main(argv: List[str] | None = None) -> None:
             continue
         env = os.environ.copy()
         env.setdefault('PYTHONHASHSEED', '0')
-        # 关键：让 colmap_loader 只在 AABB 内加载 COLMAP 点云
-        env['AABB_JSON'] = str(aabb_json)
-        # 可选：把“使用的 AABB”打印出来便于排查
+        env['AABB_JSON'] = str(aabb_json)  # for colmap_loader to optionally use AABB
         print(f"[train][env] AABB_JSON={env['AABB_JSON']}")
         proc = subprocess.run(cmd, cwd=str(Path(__file__).resolve().parent), env=env, check=False)
         if proc.returncode != 0:
