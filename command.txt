@@ -15,7 +15,7 @@ python train.py -s dataset\soccer_dynamic_player_B\frame_1 -o .\output_seq\socce
 
 
 Aggressive-8k
-python ta_train.py -s dataset\soccer_dynamic_player_B -o ./output_seq/soccer_dynamic_player_B --frames 1 -- --iterations 8000 -r 1 --sh_degree 3 --densify_from_iter 2500 --densify_until_iter 4500 --densification_interval 600 --densify_grad_threshold 1e-3 --opacity_reset_interval 10000 --lambda_dssim 0.15 --depth_l1_weight_init 0 --depth_l1_weight_final 0 --test_iterations 999999 --save_iterations 999999 --disable_viewer
+python ta_train.py -s dataset\soccer_dynamic_player_B -o ./output_seq/soccer_dynamic_player_B --frames 9 -- --iterations 8000 -r 1 --sh_degree 3 --densify_from_iter 2500 --densify_until_iter 4500 --densification_interval 600 --densify_grad_threshold 1e-3 --opacity_reset_interval 10000 --lambda_dssim 0.15 --depth_l1_weight_init 0 --depth_l1_weight_final 0 --test_iterations 999999 --save_iterations 999999 --disable_viewer
 
 Fast-12k（速度/质量平衡，推荐）
 python ta_train.py -s ./dataset/soccer_ellipse -o ./output_seq/soccer_ellipse --frames 1 -- --iterations 12000 -r 1 --sh_degree 3 --densify_from_iter 2000 --densify_until_iter 5000 --densification_interval 400 --densify_grad_threshold 7e-4 --opacity_reset_interval 8000 --depth_l1_weight_init 0 --depth_l1_weight_final 0 --test_iterations 999999 --save_iterations 999999 --disable_viewer
@@ -41,8 +41,8 @@ https://drive.google.com/file/d/1kq6b26OoOSPZXPCZCCnqICCKOgX5sUvd/view?usp=drive
 zip -r output_seq.zip output_seq
 
 
-python pack/ta_pack.py -m ./output_seq --name option1_stadium --prefix model_frame_ --out ./output_seq_packed --autocreate
-python pack/ta_pack.py -m ./output_seq  --name soccer_dynamic_player_masked --prefix model_frame_ --out ./output_seq_packed --autocreate
+python pack/ta_pack.py -m ./output_seq --name soccer_dynamic_player_B --prefix model_frame_ --out ./output_seq_packed --autocreate
+python pack/ta_pack.py -m ./output_seq  --name soccer_dynamic_player_B_70cams --prefix model_frame_ --out ./output_seq_packed --autocreate
 python pack\ta_pack.py `
   --single_ply .\output_seq\merged\frame_1\point_cloud.ply `
   --out_pt     .\output_seq_packed\merged\model_frame_1\iter_8000.pt `
@@ -51,22 +51,20 @@ python pack\pack.py --model output_seq\soccer_dynamic_player_original_train --ou
 
 
 python server/ta_server_slots.py -p .\output_seq_packed\option1_stadium --prefix model_frame_ --slots 4  --warmup --neighbor_prefetch --camera_json ..\camera.json --port 7860
-python server/ta_server_slots.py -p .\output_seq_packed\soccer_dynamic_player_aabb_only --prefix model_frame_ --slots 4  --warmup --neighbor_prefetch --camera_json ..\camera.json --port 7860
-python server/ta_server_slots.py -p .\output_seq_packed\merged --prefix model_frame_ --slots 4  --warmup --neighbor_prefetch --camera_json ..\camera.json --port 7860
-python server/ta_server_slots.py -p .\output_seq_packed\soccer_dynamic_player_masked --prefix model_frame_ --slots 4  --warmup --neighbor_prefetch --camera_json ..\camera.json --port 7860
-python server/ta_server_slots.py -p .\output_seq_packed\soccer_dynamic_player_original_train --prefix model_frame_ --slots 4  --warmup --neighbor_prefetch --camera_json ..\camera.json --port 7860
+python server/ta_server_slots.py -p .\output_seq_packed\soccer_B_with_full_stadium --prefix model_frame_ --slots 4  --warmup --neighbor_prefetch --camera_json ..\camera.json --port 7860
+python server/ta_server_slots.py -p .\output_seq_packed\soccer_dynamic_player_B_70cams --prefix model_frame_ --slots 4  --warmup --neighbor_prefetch --camera_json ..\camera.json --port 7860
+python server/ta_server_slots.py -p output_seq_packed\soccer_dynamic_player_B --prefix model_frame_ --slots 4  --warmup --neighbor_prefetch --camera_json ..\camera.json --port 7860
 
 python aabb_gui.py --pc ./dataset/soccer_static_no_player_only_stadium/frame_1/fused_points.ply --out aabb_B.json
 # 或带初始 AABB
 python aabb_gui.py --pc ./dataset/soccer_static_no_player_only_stadium/frame_1/fused_points.ply --init aabb_B.json --out aabb_B.json
 
 python .\ta_train_masked.py `
-  -s .\dataset\soccer_dynamic_player_B `
-  -o .\output_seq\soccer_dynamic_player_masked `
-  --frames 1 `
+  -s dataset\soccer_dynamic_player_B_70cams `
+  -o .\output_seq\soccer_dynamic_player_B_70cams `
+  --frames 9 `
   --mask_mode aabb_only `
   --aabb .\aabb_B.json `
-  --save_mask_png `
   --aabb_close_px 2 --close_px 1 --dilate_px 1 `
   -- `
   --iterations 8000 -r 1 --sh_degree 3 `
@@ -74,43 +72,9 @@ python .\ta_train_masked.py `
   --densification_interval 600 --densify_grad_threshold 1e-3 `
   --opacity_reset_interval 10000 --lambda_dssim 0.15 `
   --depth_l1_weight_init 0 --depth_l1_weight_final 0 `
-  --test_iterations 999999 --save_iterations 999999 --disable_viewer --optimizer_type sparse_adam
+  --test_iterations 999999 --save_iterations 999999 `
+  --disable_viewer --optimizer_type sparse_adam
 
-python .\ta_train_masked.py `
-  -s .\dataset\soccer_dynamic_player_B `
-  -o .\output_seq\soccer_dynamic_player_masked_aabb `
-  --frames 1 `
-  --mask_mode aabb_only `
-  --aabb .\aabb_B.json `
-  --save_mask_png `
-  --aabb_close_px 1 --close_px 1 --dilate_px 2 `
-  --masked `
-  -- `
-  --iterations 7000 -r 1 --sh_degree 3 `
-  --densify_from_iter 1000 --densify_until_iter 3600 `
-  --densification_interval 500 --densify_grad_threshold 7e-4 `
-  --opacity_reset_interval 10000 --lambda_dssim 0.12 `
-  --depth_l1_weight_init 0 --depth_l1_weight_final 0 `
-  --test_iterations 999999 --save_iterations 999999 --disable_viewer `
-  --optimizer_type sparse_adam
-
-python .\ta_train_masked.py `
-  -s .\dataset\soccer_dynamic_player_B `
-  -o .\output_seq\soccer_dynamic_player_masked_aabb_fast `
-  --frames 1 `
-  --mask_mode aabb_only `
-  --aabb .\aabb_B.json `
-  --save_mask_png `
-  --aabb_close_px 1 --close_px 1 --dilate_px 2 `
-  --masked `
-  -- `
-  --iterations 6000 -r 1 --sh_degree 3 `
-  --densify_from_iter 800 --densify_until_iter 3200 `
-  --densification_interval 400 --densify_grad_threshold 5e-4 `
-  --opacity_reset_interval 10000 --lambda_dssim 0.10 `
-  --depth_l1_weight_init 0 --depth_l1_weight_final 0 `
-  --test_iterations 999999 --save_iterations 999999 --disable_viewer `
-  --optimizer_type sparse_adam
 
 
 python .\make_residual_masks.py `
@@ -166,9 +130,10 @@ python server/ta_server_slots.py -p .\output_seq_packed\merged --prefix model_fr
 
 .\run_ta_pipeline.ps1 `
   -A_Ply ".\output_seq\static_stadium\model_frame_1\point_cloud\iteration_16000\point_cloud.ply" `
+  -A_Images_Single "dataset\soccer_static_no_player_only_stadium\frame_1\images" `
   -B_Model_Root ".\output_seq\soccer_dynamic_player_masked_aabb_fast" `
   -B_Dataset_Root ".\dataset\soccer_dynamic_player_B" `
   -AABB_Json "aabb_B.json" `
-  -Frame_Min 1 -Frame_Max 5 `
+  -Frame_Min 1 -Frame_Max 1 `
   -Out_Name "soccer_merged" `
-  -Slots 4 -Port 7860 -Host "0.0.0.0" `
+  -Slots 4 -Port 7860 -BindHost "0.0.0.0" `

@@ -1,31 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-AABB-only masking (single-stage)
---------------------------------
-This script creates per-view foreground masks using **only** the AABB's
-ray–box intersection against each camera ray (no depth comparison).
+AABB-only masking (single-stage) — 路径稳定版
+--------------------------------------------
+输出路径严格镜像 COLMAP images.txt 的 name（相对路径），避免不同相机目录下
+相同 stem 发生碰撞。统一规则：
+- masked_gt/<relpath>.png
+- masks/<relpath>.png          (当 --save_mask_png)
+- masks_aabb/<relpath>.png     (当 --save_aabb_png)
+- masks_raw/<relpath>.npy
 
-It mirrors the AABB projection logic you already use, and saves:
-  out/
-    masked_gt/   (GT image with background blacked out)
-    masks/       (binary PNGs, if --save_mask_png)
-    masks_raw/   (float32 .npy masks, 0/1)
-    masks_aabb/  (alias of masks/ when --save_aabb_png)
-
-Notes
------
-- Flags like --pc and --A_depth_dir are accepted for CLI *compatibility* but
-  are ignored in this script.
-- Optional morphology is provided to close tiny gaps or slightly expand masks.
-
-Example (PowerShell multi-line with backticks is provided in chat).
+说明：
+- --pc / --A_depth_dir 仅为兼容参数，实际不使用。
+- 可选的形态学操作用于闭合小孔洞与轻微膨胀。
 """
 
 import argparse
 from pathlib import Path
 import json
-import re
 import numpy as np
 import cv2
 
@@ -33,8 +25,7 @@ import cv2
 
 def parse_aabb(aabb_json_path):
     data = json.loads(Path(aabb_json_path).read_text(encoding="utf-8"))
-    def as_np(v):
-        return np.array(v, dtype=float)
+    def as_np(v): return np.array(v, dtype=float)
     if "min" in data and "max" in data:
         lo, hi = as_np(data["min"]), as_np(data["max"])
     elif "center" in data and ("size" in data or "extent" in data or "half_size" in data):
@@ -65,7 +56,6 @@ def qvec2rotmat(q):
         [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
     ], dtype=np.float64)
 
-
 def get_fx_fy_cx_cy(model, params):
     m = model.upper()
     if m == "SIMPLE_PINHOLE":
@@ -78,20 +68,17 @@ def get_fx_fy_cx_cy(model, params):
         fx, fy, cx, cy = params[:4]
     return float(fx), float(fy), float(cx), float(cy)
 
-
 def read_cameras_text(path):
     cams = {}
     with open(path, "r", encoding="utf-8") as f:
         for ln in f:
-            if not ln.strip() or ln.startswith("#"):
-                continue
+            if not ln.strip() or ln.startswith("#"): continue
             toks = ln.split()
             cam_id = int(toks[0]); model = toks[1]
             w, h = int(toks[2]), int(toks[3])
             params = np.array(list(map(float, toks[4:])), dtype=np.float64)
             cams[cam_id] = (model, w, h, params)
     return cams
-
 
 def read_images_text(path):
     imgs = {}
@@ -110,33 +97,19 @@ def read_images_text(path):
         tvec = np.array(list(map(float, toks[5:8])), dtype=np.float64)
         cam_id = int(toks[8]); name = toks[9]
         imgs[img_id] = {"qvec": qvec, "tvec": tvec, "camera_id": cam_id, "name": name}
-        i += 2
+        i += 2  # skip points line
     return imgs
-
 
 def load_colmap_model(root: Path):
     base = root / "sparse" / "0"
-    if not base.exists():
-        base = root / "sparse"
+    if not base.exists(): base = root / "sparse"
     cams = read_cameras_text(base / "cameras.txt")
     imgs = read_images_text(base / "images.txt")
     return cams, imgs
 
-_digit_re = re.compile(r"^\d+$")
-
-def index_from_image_name(name: str, image_id: int) -> str:
-    stem = Path(name).stem
-    return stem if _digit_re.match(stem) else f"{image_id:04d}"
-
 # ---------------- Core: AABB → per-pixel mask ----------------
 
 def aabb_projection_mask(lo, hi, q, tvec, intr, wh):
-    """
-    Ray–box (slab) intersection in world space:
-    For each pixel, cast a ray from the camera center and set mask=True if the
-    ray intersects the AABB with t_max >= max(t_min, t_near) and the hit lies
-    in front of the camera.
-    """
     fx, fy, cx, cy = intr
     w, h = wh
 
@@ -146,14 +119,14 @@ def aabb_projection_mask(lo, hi, q, tvec, intr, wh):
     # camera center in world
     Cw = -Rt @ tvec
 
-    # pixel grid → ray direction in camera
+    # pixel grid → ray dir in camera
     uu, vv = np.meshgrid(np.arange(w, dtype=np.float64),
                          np.arange(h, dtype=np.float64))
     dc_x = (uu - cx) / fx
     dc_y = (vv - cy) / fy
     dc_z = np.ones_like(dc_x)
 
-    # ray dir in world (normalize not required for slab method)
+    # ray dir in world
     dir_w_x = Rt[0, 0] * dc_x + Rt[0, 1] * dc_y + Rt[0, 2] * dc_z
     dir_w_y = Rt[1, 0] * dc_x + Rt[1, 1] * dc_y + Rt[1, 2] * dc_z
     dir_w_z = Rt[2, 0] * dc_x + Rt[2, 1] * dc_y + Rt[2, 2] * dc_z
@@ -165,10 +138,8 @@ def aabb_projection_mask(lo, hi, q, tvec, intr, wh):
 
     t1x = (lo[0] - Cw[0]) * inv_x; t2x = (hi[0] - Cw[0]) * inv_x
     tminx = np.minimum(t1x, t2x);  tmaxx = np.maximum(t1x, t2x)
-
     t1y = (lo[1] - Cw[1]) * inv_y; t2y = (hi[1] - Cw[1]) * inv_y
     tminy = np.minimum(t1y, t2y);  tmaxy = np.maximum(t1y, t2y)
-
     t1z = (lo[2] - Cw[2]) * inv_z; t2z = (hi[2] - Cw[2]) * inv_z
     tminz = np.minimum(t1z, t2z);  tmaxz = np.maximum(t1z, t2z)
 
@@ -187,76 +158,72 @@ def main():
     ap.add_argument("--A_depth_dir", default=None, help="(ignored) for CLI compatibility")
 
     ap.add_argument("--aabb", required=True, help="Path to aabb_B.json")
-    ap.add_argument("--colmap", required=True, help="COLMAP root (contains sparse/ or sparse/0 and images/")
+    ap.add_argument("--colmap", required=True, help="COLMAP root (contains sparse/ or sparse/0 and images/)")
     ap.add_argument("--gt_dir", default=None, help="GT images dir (default: <colmap>/images)")
     ap.add_argument("--out", required=True, help="Output root directory")
 
-    # Optional morphology
+    # Morphology
     ap.add_argument("--aabb_close_px", type=int, default=0, help="Close radius applied to raw AABB mask")
     ap.add_argument("--close_px", type=int, default=0, help="Final closing before dilation")
     ap.add_argument("--dilate_px", type=int, default=0, help="Final dilation after closing")
 
-    # Optional image saves
+    # Optional saves
     ap.add_argument("--save_aabb_png", action="store_true", help="Save raw AABB masks (PNG)")
     ap.add_argument("--save_mask_png", action="store_true", help="Save final masks (PNG)")
     args = ap.parse_args()
 
     out_dir = Path(args.out); out_dir.mkdir(parents=True, exist_ok=True)
-    out_masked = out_dir / "masked_gt"; out_masked.mkdir(parents=True, exist_ok=True)
-    out_masks_npy = out_dir / "masks_raw"; out_masks_npy.mkdir(parents=True, exist_ok=True)
+    out_masked = out_dir / "masked_gt"
+    out_masks_npy = out_dir / "masks_raw"
     out_aabb_png = out_dir / "masks_aabb"
     out_mask_png = out_dir / "masks"
+    out_masked.mkdir(parents=True, exist_ok=True)
+    out_masks_npy.mkdir(parents=True, exist_ok=True)
     if args.save_aabb_png: out_aabb_png.mkdir(parents=True, exist_ok=True)
     if args.save_mask_png: out_mask_png.mkdir(parents=True, exist_ok=True)
 
-    # Load AABB
+    # Load AABB & COLMAP
     lo, hi = parse_aabb(args.aabb)
-
-    # Load COLMAP model + images
     colmap_root = Path(args.colmap)
     cams, imgs = load_colmap_model(colmap_root)
     gt_dir = Path(args.gt_dir) if args.gt_dir else (colmap_root / "images")
 
+    show_n = 0
     for img_id, rec in imgs.items():
-        name = rec["name"]
-        idx_str = index_from_image_name(name, img_id)
+        name = rec["name"]               # e.g. cam01/0001.png 或 0001.png
+        rel = Path(name)                 # 保留相对目录
+        rel_noext = rel.with_suffix("")  # 去扩展名
+
         cam_id = rec["camera_id"]
         q, t = rec["qvec"], rec["tvec"]
         model, w, h, params = cams[cam_id]
         fx, fy, cx, cy = get_fx_fy_cx_cy(model, params)
-        intr = (fx, fy, cx, cy)
-        wh = (w, h)
+        intr, wh = (fx, fy, cx, cy), (w, h)
 
-        # ----- AABB projection → mask -----
+        # ---- AABB → mask ----
         mask = aabb_projection_mask(lo, hi, q, t, intr, wh)
 
-        # Optional pre-close (tighten boxes & remove pinholes)
+        # 形态学
         if args.aabb_close_px > 0:
             k = 2 * int(args.aabb_close_px) + 1
-            mask = cv2.morphologyEx(mask.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((k, k), np.uint8)).astype(bool)
-
-        # Optional final smooth
+            mask = cv2.morphologyEx(mask.astype(np.uint8), cv2.MORPH_CLOSE,
+                                    np.ones((k, k), np.uint8)).astype(bool)
         if args.close_px > 0:
             k = 2 * int(args.close_px) + 1
-            mask = cv2.morphologyEx(mask.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((k, k), np.uint8)).astype(bool)
+            mask = cv2.morphologyEx(mask.astype(np.uint8), cv2.MORPH_CLOSE,
+                                    np.ones((k, k), np.uint8)).astype(bool)
         if args.dilate_px > 0:
             k = 2 * int(args.dilate_px) + 1
-            mask = cv2.dilate(mask.astype(np.uint8), np.ones((k, k), np.uint8), iterations=1).astype(bool)
+            mask = cv2.dilate(mask.astype(np.uint8),
+                              np.ones((k, k), np.uint8), iterations=1).astype(bool)
 
-        # Save raw mask images if requested
-        if args.save_aabb_png:
-            cv2.imwrite(str(out_aabb_png / f"{idx_str}.png"), (mask.astype(np.uint8) * 255))
-        if args.save_mask_png:
-            cv2.imwrite(str(out_mask_png / f"{idx_str}.png"), (mask.astype(np.uint8) * 255))
-
-        # Apply mask on GT image
+        # 读取 GT（优先 gt_dir，其次 colmap_root）
         gt_path1 = gt_dir / name
         gt_path2 = colmap_root / name
         gt_path = gt_path1 if gt_path1.exists() else gt_path2
         if not gt_path.exists():
             print(f"[warn] Missing GT image: {gt_path1} / {gt_path2} (skip)")
             continue
-
         img = cv2.imread(str(gt_path), cv2.IMREAD_UNCHANGED)
         if img is None:
             print(f"[warn] Failed to read GT image: {gt_path} (skip)")
@@ -264,18 +231,34 @@ def main():
         if img.shape[:2] != (h, w):
             img = cv2.resize(img, (w, h), interpolation=cv2.INTER_LINEAR)
 
-        if img.ndim == 2:
-            img = img[:, :, None]
+        if img.ndim == 2: img = img[:, :, None]
         mask3 = np.repeat(mask[:, :, None], img.shape[2], axis=2)
         masked = (img.astype(np.float32) * mask3).astype(img.dtype)
 
-        # Save masked result + raw npy
-        (out_masked / f"{idx_str}.png").parent.mkdir(parents=True, exist_ok=True)
-        cv2.imwrite(str(out_masked / f"{idx_str}.png"), masked)
-        np.save(str(out_masks_npy / f"{idx_str}.npy"), mask.astype(np.float32))
+        # —— 输出路径（镜像相对目录）——
+        p_masked = (out_masked / rel_noext).with_suffix(".png")
+        p_rawnpy = (out_masks_npy / rel_noext).with_suffix(".npy")
+        p_mask_png = (out_mask_png / rel_noext).with_suffix(".png")
+        p_aabb_png = (out_aabb_png / rel_noext).with_suffix(".png")
+
+        p_masked.parent.mkdir(parents=True, exist_ok=True)
+        p_rawnpy.parent.mkdir(parents=True, exist_ok=True)
+        if args.save_mask_png: p_mask_png.parent.mkdir(parents=True, exist_ok=True)
+        if args.save_aabb_png: p_aabb_png.parent.mkdir(parents=True, exist_ok=True)
+
+        # 保存
+        cv2.imwrite(str(p_masked), masked)
+        np.save(str(p_rawnpy), mask.astype(np.float32))
+        if args.save_mask_png:
+            cv2.imwrite(str(p_mask_png), (mask.astype(np.uint8) * 255))
+        if args.save_aabb_png:
+            cv2.imwrite(str(p_aabb_png), (mask.astype(np.uint8) * 255))
+
+        if show_n < 5:
+            print(f"[mask-save] {name} -> masked_gt/{rel_noext}.png ; masks_raw/{rel_noext}.npy")
+            show_n += 1
 
     print("[done] AABB-only masked GT saved to:", out_masked)
-
 
 if __name__ == "__main__":
     main()

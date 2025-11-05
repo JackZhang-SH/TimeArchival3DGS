@@ -1,28 +1,23 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Batch-merge A (static) with all B frames (latest iteration per frame),
+replicating the behavior of:
+  merge_A_B.py (shrink+feather, optional cull, multiview mask voting)
++ make_residual_masks.py (auto-generate masks_residual if missing)
 
-# merge_A_B_batch.py — Batch merge A (static) with all B frames (latest iteration per frame),
-#                        using ONLY multiview mask voting for B before merging.
-#
-# Key behavior:
-#   - For each frame under --b_root (supports "model_frame_n" or "frame_n"):
-#       * Find the latest .../point_cloud/iteration_*/point_cloud.ply as B.
-#       * Auto-set colmap_dir = <frame_dir>/sparse/0
-#       * Auto-set masks_dir  = <frame_dir>/masks_residual
-#       * Run multiview mask voting on B with those paths (no user flags for them).
-#       * Feature-align A/B (pad or trunc) and write merged PLY to --out_root/frame_n/point_cloud_merged.ply
-#
-# Usage (PowerShell example):
-#   python merge_A_B_batch.py `
-#     --a_ply output_seq/static_stadium/model_frame_1/point_cloud/iteration_16000/point_cloud.ply `
-#     --b_root output_seq/soccer_dynamic_player_masked_aabb `
-#     --out_root output_seq/merged `
-#     --feature_align pad `
-#     --mask_ext .png --mask_dilate_px 0 --min_views 25 --subsample_cams 0
-#
-# Dependencies:
-#   pip install plyfile numpy opencv-python
-#
+B point cloud     : from B MODEL ROOT -> model_frame_n/point_cloud/iteration_*/point_cloud.ply (pick max iter)
+COLMAP + GT imgs  : from B DATASET ROOT -> frame_n/sparse/0 and frame_n/images
+A-only renders    : EITHER
+    (A) --a_images_root   -> frame_n/images  (per-frame root)
+ OR (B) --a_images_single -> a single images folder reused for all frames
+Masks directory   : frame_n/masks_residual (use if exists; otherwise auto-make if A images provided)
 
-import os, re, sys, json, random
+Output:
+  out_root/frame_n/point_cloud_merged.ply
+"""
+
+import os, re, sys, json, random, subprocess
 from argparse import ArgumentParser
 
 def die(msg, code=1):
@@ -30,6 +25,10 @@ def die(msg, code=1):
     sys.exit(code)
 
 # ---------- PLY IO ----------
+def _stackf(lst):
+    import numpy as np
+    return np.stack([x for x in lst], axis=1).astype("float32")
+
 def read_ply_xyzcso(path):
     import numpy as np
     try:
@@ -41,17 +40,17 @@ def read_ply_xyzcso(path):
     if "vertex" not in ply: die("PLY has no 'vertex' element.")
     v = ply["vertex"].data; names = v.dtype.names
 
-    need = ["x","y","z","opacity","scale_0","scale_1","scale_2","rot_0","rot_1","rot_2","rot_3","f_dc_0","f_dc_1","f_dc_2"]
+    need = ["x","y","z","opacity","scale_0","scale_1","scale_2",
+            "rot_0","rot_1","rot_2","rot_3","f_dc_0","f_dc_1","f_dc_2"]
     for k in need:
         if k not in names:
             die(f"PLY field '{k}' missing. Got fields: {names}")
 
-    xyz = np.stack([v["x"], v["y"], v["z"]], axis=1).astype("float32")
+    xyz = _stackf([v["x"], v["y"], v["z"]])
     op  = v["opacity"].astype("float32")[:,None]
-    sc  = np.stack([v["scale_0"], v["scale_1"], v["scale_2"]], axis=1).astype("float32")
-    rot = np.stack([v["rot_0"], v["rot_1"], v["rot_2"], v["rot_3"]], axis=1).astype("float32")
-    f_dc = np.stack([v["f_dc_0"], v["f_dc_1"], v["f_dc_2"]], axis=1).astype("float32")
-
+    sc  = _stackf([v["scale_0"], v["scale_1"], v["scale_2"]])
+    rot = _stackf([v["rot_0"], v["rot_1"], v["rot_2"], v["rot_3"]])
+    f_dc = _stackf([v["f_dc_0"], v["f_dc_1"], v["f_dc_2"]])
     f_list = []; k = 0
     while True:
         name = f"f_rest_{k}"
@@ -59,6 +58,7 @@ def read_ply_xyzcso(path):
             f_list.append(v[name].astype("float32")[:,None]); k += 1
         else:
             break
+    import numpy as np
     f_rest = np.concatenate(f_list, axis=1) if f_list else np.zeros((xyz.shape[0],0), "float32")
     return dict(xyz=xyz, opacity=op, scale=sc, rot=rot, f_dc=f_dc, f_rest=f_rest)
 
@@ -86,13 +86,99 @@ def write_ply_xyzcso(path, data):
     os.makedirs(out_dir, exist_ok=True)
     plyfile.PlyData([plyfile.PlyElement.describe(arr, "vertex")], text=False).write(path)
 
-# ---------- COLMAP + mask voting ----------
+# ---------- AABB utils ----------
+def smoothstep(edge0, edge1, x):
+    import numpy as np
+    t = np.clip((x - edge0) / max(1e-12, (edge1 - edge0)), 0.0, 1.0)
+    return t*t*(3.0 - 2.0*t)
+
+def _arr3(v):
+    import numpy as np
+    if isinstance(v, (list, tuple)) and len(v)==3:
+        return np.array([float(v[0]), float(v[1]), float(v[2])], dtype=np.float32)
+    if isinstance(v, dict) and all(k in v for k in ("x","y","z")):
+        return np.array([float(v["x"]), float(v["y"]), float(v["z"])], dtype=np.float32)
+    return None
+
+def parse_aabb_any(obj):
+    import numpy as np
+    if isinstance(obj, dict):
+        if "min" in obj and "max" in obj:
+            mn, mx = _arr3(obj["min"]), _arr3(obj["max"])
+            if mn is not None and mx is not None: return mn, mx
+        for k in ("aabb","bounds","box"):
+            if k in obj:
+                sub = obj[k]
+                if isinstance(sub, dict) and "min" in sub and "max" in sub:
+                    mn, mx = _arr3(sub["min"]), _arr3(sub["max"]); 
+                    if mn is not None and mx is not None: return mn, mx
+                if isinstance(sub, (list, tuple)) and len(sub)==2:
+                    mn, mx = _arr3(sub[0]), _arr3(sub[1])
+                    if mn is not None and mx is not None: return mn, mx
+        if "center" in obj:
+            c = _arr3(obj["center"])
+            if c is not None:
+                for key in ("extent","half_size","size"):
+                    if key in obj:
+                        e = _arr3(obj[key])
+                        if e is not None:
+                            if key=="size": e = e*0.5
+                            return c - e, c + e
+        flat = ("xmin","xmax","ymin","ymax","zmin","zmax")
+        if all(k in obj for k in flat):
+            mn = [float(obj["xmin"]), float(obj["ymin"]), float(obj["zmin"])]
+            mx = [float(obj["xmax"]), float(obj["ymax"]), float(obj["zmax"])]
+            return np.array(mn, dtype=np.float32), np.array(mx, dtype=np.float32)
+    if isinstance(obj, (list, tuple)) and len(obj)==2:
+        mn, mx = _arr3(obj[0]), _arr3(obj[1])
+        if mn is not None and mx is not None: return mn, mx
+    die("AABB JSON not recognized.")
+
+def feather_B_opacity_in_aabb(B, aabb_min, aabb_max, shrink_m=0.0, feather_m=0.0):
+    import numpy as np
+    xyz = B["xyz"]; op = B["opacity"]
+    half_sizes = (aabb_max - aabb_min) * 0.5
+    cap = float(np.maximum(0.0, np.min(half_sizes) - 1e-7))
+    shrink_m = min(max(0.0, float(shrink_m)), cap)
+    bmin_p = aabb_min + shrink_m
+    bmax_p = aabb_max - shrink_m
+    d = np.minimum.reduce([
+        xyz[:,0]-bmin_p[0], bmax_p[0]-xyz[:,0],
+        xyz[:,1]-bmin_p[1], bmax_p[1]-xyz[:,1],
+        xyz[:,2]-bmin_p[2], bmax_p[2]-xyz[:,2]
+    ])
+    w = smoothstep(0.0, max(1e-6, float(feather_m)), d).astype("float32")
+    B["opacity"] = (op[:,0] * w)[:,None]
+    print(f"[feather B] shrink={shrink_m:.3f}, feather={feather_m:.3f} | "
+          f"w=1:{int((w>=0.999).sum())}, 0<w<1:{int(((w>0)&(w<0.999)).sum())}, w=0:{int((w<=0).sum())}/{w.shape[0]}")
+
+def cull_B_outside(B, aabb_min, aabb_max, shrink_m=0.0, mode="orig"):
+    import numpy as np
+    if mode not in ("orig","shrunken"): mode="orig"
+    bmin = aabb_min.copy(); bmax = aabb_max.copy()
+    if mode=="shrunken" and shrink_m>0: bmin += shrink_m; bmax -= shrink_m
+    xyz = B["xyz"]
+    inside = (
+        (xyz[:,0] >= bmin[0]) & (xyz[:,0] <= bmax[0]) &
+        (xyz[:,1] >= bmin[1]) & (xyz[:,1] <= bmax[1]) &
+        (xyz[:,2] >= bmin[2]) & (xyz[:,2] <= bmax[2])
+    )
+    drop = int((~inside).sum())
+    if drop>0:
+        print(f"[cull] remove {drop} B pts outside {mode} box; keep {int(inside.sum())}.")
+        for k in ("xyz","opacity","scale","rot","f_dc","f_rest"):
+            B[k] = B[k][inside]
+    else:
+        print("[cull] no B points outside AABB to remove.")
+
+# ---------- COLMAP + masks voting ----------
 def load_colmap_simple(colmap_dir):
     cams_params = {}
     camfile = os.path.join(colmap_dir, "cameras.txt")
     imgfile = os.path.join(colmap_dir, "images.txt")
     if not (os.path.isfile(camfile) and os.path.isfile(imgfile)):
         die(f"COLMAP files not found in {colmap_dir}")
+
     with open(camfile, "r", encoding="utf-8") as f:
         for line in f:
             if line.startswith("#") or not line.strip(): continue
@@ -106,6 +192,7 @@ def load_colmap_simple(colmap_dir):
             cams_params[cam_id] = dict(w=w, h=h, fx=fx, fy=fy, cx=cx, cy=cy)
 
     cams = []
+    import numpy as np
     with open(imgfile, "r", encoding="utf-8") as f:
         for line in f:
             if line.startswith("#") or not line.strip(): continue
@@ -115,7 +202,6 @@ def load_colmap_simple(colmap_dir):
             qw, qx, qy, qz = map(float, toks[1:5])
             tx, ty, tz = map(float, toks[5:8])
             cam_id = int(toks[8]); name = toks[9]
-            import numpy as np
             q = np.array([qw,qx,qy,qz], dtype=np.float64)
             q = q / (np.linalg.norm(q) + 1e-12)
             w,x,y,z = q
@@ -132,7 +218,7 @@ def load_colmap_simple(colmap_dir):
 def project_points(P, cam):
     import numpy as np
     R, t = cam["R"], cam["t"]
-    Xc = (R @ P.T + t.reshape(3,1)).T  # N,3
+    Xc = (R @ P.T + t.reshape(3,1)).T
     zc = Xc[:,2]
     valid = zc > 1e-6
     u = cam["fx"] * (Xc[:,0]/zc) + cam["cx"]
@@ -155,7 +241,7 @@ def build_mask_loader(masks_dir, mask_ext, dilate_px=0):
         return (m > 127)
     return get_mask
 
-def filter_B_by_multiview_masks(B, cams, masks_dir, mask_ext=".png", mask_dilate_px=3,
+def filter_B_by_multiview_masks(B, cams, masks_dir, mask_ext=".png", mask_dilate_px=0,
                                 min_views=2, subsample_cams=0):
     import numpy as np
     if subsample_cams and 0 < subsample_cams < len(cams):
@@ -164,7 +250,6 @@ def filter_B_by_multiview_masks(B, cams, masks_dir, mask_ext=".png", mask_dilate
 
     P = B["xyz"].astype(np.float64); N = P.shape[0]
     votes = np.zeros(N, dtype=np.int32)
-
     bs = 200000
     for i in range(0, N, bs):
         idx = slice(i, min(i+bs, N))
@@ -191,9 +276,9 @@ def filter_B_by_multiview_masks(B, cams, masks_dir, mask_ext=".png", mask_dilate
         for k in ("xyz","opacity","scale","rot","f_dc","f_rest"):
             B[k] = B[k][keep]
 
-# ---------- Frame discovery ----------
-def find_latest_B_ply(b_frame_dir):
-    pc_root = os.path.join(b_frame_dir, "point_cloud")
+# ---------- Frame discovery (MODEL root) ----------
+def find_latest_B_ply(model_frame_dir):
+    pc_root = os.path.join(model_frame_dir, "point_cloud")
     if not os.path.isdir(pc_root):
         return (None, None)
     best_iter = -1
@@ -202,21 +287,18 @@ def find_latest_B_ply(b_frame_dir):
     for name in os.listdir(pc_root):
         m = it_pat.match(name)
         if not m: continue
-        try:
-            it = int(m.group(1))
-        except Exception:
-            continue
+        it = int(m.group(1))
         ply_path = os.path.join(pc_root, name, "point_cloud.ply")
         if os.path.isfile(ply_path) and it > best_iter:
             best_iter = it
             best_path = ply_path
     return best_path, best_iter
 
-def list_model_frames(b_root):
+def list_model_frames(model_root):
     frames = []
     pat = re.compile(r"^(model_frame_|frame_)(\d+)$")
-    for name in os.listdir(b_root):
-        path = os.path.join(b_root, name)
+    for name in os.listdir(model_root):
+        path = os.path.join(model_root, name)
         if not os.path.isdir(path): continue
         m = pat.match(name)
         if not m: continue
@@ -225,33 +307,90 @@ def list_model_frames(b_root):
     frames.sort(key=lambda x: x[0])
     return frames
 
+# ---------- Auto make residual masks if missing ----------
+def dir_empty_or_missing(p):
+    return (not os.path.isdir(p)) or (len([f for f in os.listdir(p) if os.path.isfile(os.path.join(p,f))]) == 0)
+
+def ensure_masks_residual(frame_n, b_dataset_root, a_images_root, a_images_single,
+                          gt_ext=".png", a_ext=".png",
+                          thr=25, blur_px=0, open_px=0, close_px=1, dilate_px=5):
+    """Create masks_residual for this frame if missing.
+       Priority:
+         1) if masks_residual exists -> return
+         2) else if a_images_root provided -> use a_images_root/frame_n/images
+         3) else if a_images_single provided -> use that single images folder for all frames
+         4) else -> error
+    """
+    masks_dir = os.path.join(b_dataset_root, f"frame_{frame_n}", "masks_residual")
+    if not dir_empty_or_missing(masks_dir):
+        return masks_dir
+
+    if a_images_root:
+        gt_dir = os.path.join(b_dataset_root, f"frame_{frame_n}", "images")
+        a_dir  = os.path.join(a_images_root,  f"frame_{frame_n}", "images")
+    elif a_images_single:
+        gt_dir = os.path.join(b_dataset_root, f"frame_{frame_n}", "images")
+        a_dir  = a_images_single  # single directory reused for all frames
+    else:
+        die(f"masks_residual missing and no --a_images_root / --a_images_single provided for frame {frame_n}: {masks_dir}")
+
+    os.makedirs(masks_dir, exist_ok=True)
+    cmd = [
+        sys.executable, os.path.join(os.path.dirname(__file__), "make_residual_masks.py"),
+        "--gt_dir", gt_dir, "--a_dir", a_dir, "--out_dir", masks_dir,
+        "--gt_ext", gt_ext, "--a_ext", a_ext,
+        "--thr", str(thr),
+        "--blur_px", str(blur_px),
+        "--open_px", str(open_px),
+        "--close_px", str(close_px),
+        "--dilate_px", str(dilate_px),
+    ]
+    print("[auto-masks]", " ".join(cmd))
+    r = subprocess.run(cmd, stdout=sys.stdout, stderr=sys.stderr)
+    if r.returncode != 0:
+        die(f"make_residual_masks.py failed for frame {frame_n} (exit={r.returncode})")
+    return masks_dir
+
 # ---------- Merge one frame ----------
-def merge_one_frame(A, B_path, out_ply, cams, masks_dir, feature_align="pad",
+def merge_one_frame(A, B_path, out_ply, cams, masks_dir,
+                    aabb_json=None, shrink_m=0.0, feather_m=0.0,
+                    cull_outside=False, cull_box="orig",
+                    feature_align="pad",
                     mask_ext=".png", mask_dilate_px=0, min_views=2, subsample_cams=0):
     import numpy as np
     B = read_ply_xyzcso(B_path)
     print(f"[stat] B: {B['xyz'].shape[0]} points | f_rest={B['f_rest'].shape[1]} | {B_path}")
 
-    # (only route) multiview mask voting on B
+    # (1) shrink+feather on B by AABB
+    if aabb_json:
+        with open(aabb_json, "r", encoding="utf-8") as f:
+            aabb_obj = json.load(f)
+        aabb_min, aabb_max = parse_aabb_any(aabb_obj)
+        print(f"[aabb] min={aabb_min.tolist()}  max={aabb_max.tolist()}")
+        feather_B_opacity_in_aabb(B, aabb_min, aabb_max, shrink_m=shrink_m, feather_m=feather_m)
+        if cull_outside:
+            cull_B_outside(B, aabb_min, aabb_max, shrink_m=shrink_m, mode=cull_box)
+
+    # (2) multiview mask voting on B
     filter_B_by_multiview_masks(
         B, cams,
         masks_dir=masks_dir, mask_ext=mask_ext, mask_dilate_px=mask_dilate_px,
         min_views=min_views, subsample_cams=subsample_cams
     )
 
-    # Feature alignment between A and B
+    # (3) feature alignment then concat
     ar, br = A["f_rest"].shape[1], B["f_rest"].shape[1]
     if ar != br:
         if feature_align == "pad":
             target = max(ar, br)
             if ar < target:
                 A_pad = np.pad(A["f_rest"], ((0,0),(0,target-ar)), mode="constant")
+                A_use = dict(A); A_use["f_rest"] = A_pad
             else:
-                A_pad = A["f_rest"]
+                A_use = A
             if br < target:
                 B["f_rest"] = np.pad(B["f_rest"], ((0,0),(0,target-br)), mode="constant")
-            A_use = dict(A); A_use["f_rest"] = A_pad
-            print(f"[align] PAD f_rest: A {ar} -> {target}, B {br} -> {target}")
+            print(f"[align] PAD f_rest: A {ar}->{target}, B {br}->{target}")
         else:
             target = min(ar, br)
             A_use = dict(A); A_use["f_rest"] = A["f_rest"][:, :target]
@@ -260,46 +399,78 @@ def merge_one_frame(A, B_path, out_ply, cams, masks_dir, feature_align="pad",
     else:
         A_use = A
 
-    # Concat & write
     OUT = { k: np.concatenate([A_use[k], B[k]], axis=0) for k in ["xyz","opacity","scale","rot","f_dc","f_rest"] }
     write_ply_xyzcso(out_ply, OUT)
     print(f"[merge] wrote: {out_ply} | total N={OUT['xyz'].shape[0]} (A={A_use['xyz'].shape[0]} + B={B['xyz'].shape[0]})")
 
 # ---------- main ----------
 def main():
-    ap = ArgumentParser("Batch merge fixed A with all B frames (latest iteration per frame) using ONLY multiview mask voting")
+    ap = ArgumentParser("Batch merge A with all B frames (max-iter PLY per frame), shrink+feather/cull, and multiview mask voting; auto-make residual masks if missing")
     ap.add_argument("--a_ply", required=True, help="Path to static A PLY")
-    ap.add_argument("--b_root", required=True, help="Root dir containing model_frame_n for B")
-    ap.add_argument("--out_root", required=True, help="Output root; we will create out_root/frame_{n}/point_cloud_merged.ply")
+    ap.add_argument("--b_model_root", required=True, help="Root containing model_frame_n for B (trained outputs)")
+    ap.add_argument("--b_dataset_root", required=True, help="Dataset root containing frame_n with sparse/0 and images")
+    ap.add_argument("--out_root", required=True, help="Output root; will write out_root/frame_n/point_cloud_merged.ply")
+    # A-only renders (choose one):
+    ap.add_argument("--a_images_root", type=str, default=None, help="Root containing frame_n/images of A-only renders (per-frame)")
+    ap.add_argument("--a_images_single", type=str, default=None, help="Single images folder of A-only renders reused for all frames")
+    # make_residual_masks options (default to single-frame example)
+    ap.add_argument("--gt_ext", type=str, default=".png")
+    ap.add_argument("--a_ext", type=str, default=".png")
+    ap.add_argument("--thr", type=float, default=25.0)
+    ap.add_argument("--blur_px", type=int, default=0)
+    ap.add_argument("--open_px", type=int, default=0)
+    ap.add_argument("--close_px", type=int, default=1)
+    ap.add_argument("--dilate_px", type=int, default=5)
+    # AABB & cull & align
+    ap.add_argument("--aabb_json", type=str, required=True)
+    ap.add_argument("--shrink_m", type=float, default=0.0)
+    ap.add_argument("--feather_m", type=float, default=0.0)
+    ap.add_argument("--cull_outside", action="store_true")
+    ap.add_argument("--cull_box", choices=["orig","shrunken"], default="orig")
     ap.add_argument("--feature_align", choices=["pad","trunc"], default="pad")
     # voting controls
     ap.add_argument("--mask_ext", type=str, default=".png")
     ap.add_argument("--mask_dilate_px", type=int, default=0)
-    ap.add_argument("--min_views", type=int, default=2)
+    ap.add_argument("--min_views", type=int, default=25)
     ap.add_argument("--subsample_cams", type=int, default=0)
     args = ap.parse_args()
     print("[args]", vars(args))
 
-    # load A once
+    if (not args.a_images_root) and (not args.a_images_single):
+        print("[warn] no A-only images provided; will assume masks_residual already exist for every frame.")
+
+    # Load A once
     A = read_ply_xyzcso(args.a_ply)
     print(f"[stat] A: N={A['xyz'].shape[0]}, f_rest={A['f_rest'].shape[1]} | {args.a_ply}")
 
-    # iterate frames
-    frames = list_model_frames(args.b_root)
+    # Enumerate frames from MODEL root
+    frames = list_model_frames(args.b_model_root)
     if not frames:
-        die(f"No model_frame_n found under: {args.b_root}")
-    for n, frame_dir in frames:
-        ply_path, itN = find_latest_B_ply(frame_dir)
+        die(f"No model_frame_n found under: {args.b_model_root}")
+
+    for n, model_frame_dir in frames:
+        ply_path, itN = find_latest_B_ply(model_frame_dir)
         if not ply_path:
-            print(f"[skip] no B ply found in {os.path.relpath(frame_dir, args.b_root)}")
+            print(f"[skip] no B ply found in {os.path.relpath(model_frame_dir, args.b_model_root)}")
             continue
-        # auto paths for this frame
-        colmap_dir = os.path.join(frame_dir, "sparse", "0")
-        masks_dir  = os.path.join(frame_dir, "masks_residual")
+
+        # Dataset-side paths
+        dataset_frame_dir = os.path.join(args.b_dataset_root, f"frame_{n}")
+        colmap_dir = os.path.join(dataset_frame_dir, "sparse", "0")
         if not os.path.isdir(colmap_dir):
             die(f"Missing COLMAP dir for frame {n}: {colmap_dir}")
-        if not os.path.isdir(masks_dir):
-            die(f"Missing masks_residual for frame {n}: {masks_dir}")
+
+        # masks_residual (use if exists; else auto-make if A images provided)
+        masks_dir = os.path.join(dataset_frame_dir, "masks_residual")
+        if dir_empty_or_missing(masks_dir):
+            masks_dir = ensure_masks_residual(
+                n, args.b_dataset_root,
+                a_images_root=args.a_images_root,
+                a_images_single=args.a_images_single,
+                gt_ext=args.gt_ext, a_ext=args.a_ext,
+                thr=args.thr, blur_px=args.blur_px,
+                open_px=args.open_px, close_px=args.close_px, dilate_px=args.dilate_px
+            )
 
         cams = load_colmap_simple(colmap_dir)
 
@@ -311,9 +482,10 @@ def main():
         os.makedirs(out_dir, exist_ok=True)
         out_ply = os.path.join(out_dir, "point_cloud_merged.ply")
 
-        # Merge for this frame (multiview mask voting only)
         merge_one_frame(
             A, ply_path, out_ply, cams, masks_dir,
+            aabb_json=args.aabb_json, shrink_m=args.shrink_m, feather_m=args.feather_m,
+            cull_outside=args.cull_outside, cull_box=args.cull_box,
             feature_align=args.feature_align,
             mask_ext=args.mask_ext, mask_dilate_px=args.mask_dilate_px,
             min_views=args.min_views, subsample_cams=args.subsample_cams
@@ -322,7 +494,7 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except SystemExit as e:
+    except SystemExit:
         raise
     except Exception as e:
         import traceback

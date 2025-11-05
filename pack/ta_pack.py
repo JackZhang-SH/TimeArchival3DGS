@@ -1,10 +1,13 @@
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 ta_pack.py — Pack per-frame 3DGS PLY to contiguous `.pt` with Morton sort & FP16 attrs.
 
-New in this version:
+Overwrite-enabled version:
+  • Always (re)create per-frame output folders before writing (removes old files).
+  • Never skip existing outputs; new packs overwrite prior results.
+
+New in the original version (retained here):
   • --merged_root MODE: pack merged outputs produced by merge_A_B_batch.py
     - Input layout: <merged_root>/frame_n/point_cloud_merged.ply  (or model_frame_n)
     - Output layout: <out>/<name>/model_frame_n/model_frame_n.pt
@@ -16,10 +19,13 @@ Examples:
   # 带数据集名（输入：../output_seq/soccer，输出：../output_seq_packed/soccer）
   python ta_pack.py -m ../output_seq --name soccer --prefix model_frame_ --out ../output_seq_packed --autocreate
 
-  # 新增：merged-root 模式（输入 merged/frame_n/point_cloud_merged.ply，输出 name/model_frame_n/model_frame_n.pt）
+  # merged-root 模式（输入 merged/frame_n/point_cloud_merged.ply，输出 name/model_frame_n/model_frame_n.pt）
   python ta_pack.py --merged_root ../output_seq/merged --name soccer_merged --out ../output_seq_packed --autocreate
+
+  # 单文件模式（直接指定一个 PLY 并强制覆盖目标目录）
+  python ta_pack.py --single_ply path/to/point_cloud.ply --out ../output_seq_packed --prefix model_frame_ --frame 1 --iter 8000
 """
-import argparse, sys, math
+import argparse, sys, math, shutil
 from pathlib import Path
 import numpy as np
 import torch
@@ -192,12 +198,20 @@ def pack_one_frame(ply_path: Path, out_path: Path):
         "sh_rest": torch.from_numpy(sh_rest).to(torch.float16),
     }
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(pkg, out_path)
+    torch.save(pkg, out_path)  # overwrite if exists
     print(f"[ta_pack] saved {out_path} (N={pkg['n']}, L={pkg['sh_degree']})")
 
+# -------- helpers --------
+def ensure_clean_dir(p: Path):
+    """Remove directory `p` if it exists, then recreate it empty."""
+    if p.exists():
+        shutil.rmtree(p)
+    p.mkdir(parents=True, exist_ok=True)
+
+# ========================= main =========================
 def main():
-    ap = argparse.ArgumentParser("Pack 3DGS frames to .pt")
-    # --- 新增：单文件模式 ---
+    ap = argparse.ArgumentParser("Pack 3DGS frames to .pt (overwrite version)")
+    # --- 单文件模式 ---
     ap.add_argument("--single_ply", type=str, default=None,
                     help="直接打包这一个 PLY（跳过 models_root/frames 扫描）")
     ap.add_argument("--out_pt", type=str, default=None,
@@ -216,7 +230,7 @@ def main():
                     help="打包根目录（目录模式必需；单文件模式若未给 --out_pt 也需要）")
     ap.add_argument("--autocreate", action="store_true")
 
-    # --- 新增：merged-root 模式 ---
+    # --- merged-root 模式 ---
     ap.add_argument("--merged_root", type=str, default=None,
                     help="合并后的根目录（包含 frame_n/point_cloud_merged.ply 或 model_frame_n）")
     args = ap.parse_args()
@@ -233,7 +247,9 @@ def main():
             if not args.out:
                 raise SystemExit("[ta_pack] need --out or --out_pt in single-file mode")
             out_root = Path(args.out)
-            out_path = out_root / f"{args.prefix}{args.frame}" / f"iter_{args.iter}.pt"
+            out_dir = out_root / f"{args.prefix}{args.frame}"
+            ensure_clean_dir(out_dir)
+            out_path = out_dir / f"iter_{args.iter}.pt"
         out_path.parent.mkdir(parents=True, exist_ok=True)
         print(f"[ta_pack] single-file mode")
         print(f"[ta_pack]  ply : {ply_path}")
@@ -247,7 +263,7 @@ def main():
             raise SystemExit("[ta_pack] merged-root mode requires --out and --name/--dataset")
         merged_root = Path(args.merged_root)
         out_base = Path(args.out)
-        out_root = out_base / args.dataset  # 输出 data 集合的子目录名由 --name 控制
+        out_root = out_base / args.dataset
         if args.autocreate:
             out_root.mkdir(parents=True, exist_ok=True)
 
@@ -259,23 +275,20 @@ def main():
         print(f"[ta_pack]  merged_root : {merged_root}")
         print(f"[ta_pack]  out_root    : {out_root}")
         for n, fdir in frames:
-            # 支持两种命名，统一输出为 model_frame_n/model_frame_n.pt
             in_ply = fdir / "point_cloud_merged.ply"
             if not in_ply.exists():
                 print(f"[ta_pack] skip frame {n}: missing {in_ply}")
                 continue
             out_dir = out_root / f"model_frame_{n}"
+            ensure_clean_dir(out_dir)  # <— always clean & recreate per-frame output
             out_pt  = out_dir / f"model_frame_{n}.pt"
-            if out_pt.exists():
-                print(f"[ta_pack] exists: {out_pt}, skip")
-                continue
             print(f"[ta_pack] pack frame {n}:")
             print(f"          in  = {in_ply}")
             print(f"          out = {out_pt}")
             pack_one_frame(in_ply, out_pt)
         return
 
-    # -------- 目录模式（原有逻辑） --------
+    # -------- 目录模式（原有逻辑，改为覆盖写） --------
     if not args.models_root or not args.out:
         raise SystemExit("[ta_pack] directory mode requires --models_root and --out (no --single_ply / --merged_root).")
     models_base = Path(args.models_root)
@@ -308,10 +321,9 @@ def main():
         if not ply.exists():
             print(f"[ta_pack] skip {f}: missing {ply}")
             continue
-        out_path = out_root / f"{args.prefix}{f}" / f"iter_{it}.pt"
-        if out_path.exists():
-            print(f"[ta_pack] exists: {out_path}, skip")
-            continue
+        out_dir = out_root / f"{args.prefix}{f}"
+        ensure_clean_dir(out_dir)  # <— always clean & recreate per-frame output
+        out_path = out_dir / f"iter_{it}.pt"
         pack_one_frame(ply, out_path)
 
 if __name__ == "__main__":

@@ -1,129 +1,168 @@
+param(
+  [Parameter(Mandatory = $true)][string]$A_Ply,
+  [Parameter(Mandatory = $false)][string]$A_Images_Root = "",
+  [Parameter(Mandatory = $false)][string]$A_Images_Single = "",
+  [Parameter(Mandatory = $true)][string]$B_Model_Root,
+  [Parameter(Mandatory = $true)][string]$B_Dataset_Root,
+  [Parameter(Mandatory = $true)][string]$AABB_Json,
+  [Parameter(Mandatory = $true)][int]$Frame_Min,
+  [Parameter(Mandatory = $true)][int]$Frame_Max,
+  [Parameter(Mandatory = $true)][string]$Out_Name,
 
-Param(
-  [Parameter(Mandatory=$true)] [string] $A_Ply,
-  [Parameter(Mandatory=$true)] [string] $B_Model_Root,
-  [Parameter(Mandatory=$true)] [string] $B_Dataset_Root,
-  [Parameter(Mandatory=$true)] [string] $AABB_Json,
-  [Parameter(Mandatory=$true)] [int]    $Frame_Min,
-  [Parameter(Mandatory=$true)] [int]    $Frame_Max,
-  [Parameter(Mandatory=$true)] [string] $Out_Name,
-  [int]    $Slots = 4,
-  [int]    $Port = 7860,
-  [string] $BindHost = "0.0.0.0",
-  [string] $Camera_Json = "..\camera.json",
-  [switch] $NoViewer  # if specified, DO NOT pass --disable_viewer to train
+  # Server params (BindHost overrides ServeHost if provided)
+  [string]$ServeHost = "0.0.0.0",
+  [string]$BindHost = "",
+  [int]$Port = 7860,
+  [string]$Camera_Json = "",
+
+  # Stage switches
+  [switch]$SkipTrain,
+  [switch]$SkipMerge,
+  [switch]$SkipPack,
+  [switch]$SkipServe
 )
 
-# Fail-fast
-$ErrorActionPreference = "Stop"
-Set-StrictMode -Version Latest
+$ErrorActionPreference  = "Stop"
+$ProgressPreference     = "SilentlyContinue"
+$env:PYTHONUNBUFFERED   = "1"   # ensure immediate Python prints
 
-# Go to script directory
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-Set-Location $ScriptDir
+if ($BindHost -and $BindHost.Trim() -ne "") { $ServeHost = $BindHost }
 
-function Get-FullPath([string]$p) {
-  if ([string]::IsNullOrWhiteSpace($p)) { return $null }
-  # Use Path.GetFullPath so it doesn't require the path to already exist
-  return [System.IO.Path]::GetFullPath((Join-Path (Get-Location) $p))
-}
-
-$A_Ply          = Get-FullPath $A_Ply
-$B_Model_Root   = Get-FullPath $B_Model_Root
-$B_Dataset_Root = Get-FullPath $B_Dataset_Root
-$AABB_Json      = Get-FullPath $AABB_Json
-$Out_Seq        = Join-Path $ScriptDir "output_seq"
-$Out_Root       = Join-Path $Out_Seq $Out_Name
-$Packed_Base    = Join-Path $ScriptDir "output_seq_packed"
-$Packed_Root    = Join-Path $Packed_Base $Out_Name
-
-# Helpers
-function Step([string]$Title, [scriptblock]$Block) {
-  Write-Host "========== $Title ==========" -ForegroundColor Cyan
-  $sw = [System.Diagnostics.Stopwatch]::StartNew()
-  & $Block
-  $sw.Stop()
-  Write-Host "[OK] $Title  (${($sw.Elapsed.ToString())})" -ForegroundColor Green
-}
-
-function Run-Cmd([string]$Cmd) {
-  Write-Host ">> $Cmd" -ForegroundColor Yellow
-  $psi = New-Object System.Diagnostics.ProcessStartInfo
-  $psi.FileName = "powershell.exe"
-  $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -Command `"${Cmd}`""
-  $psi.UseShellExecute = $false
-  $psi.RedirectStandardOutput = $true
-  $psi.RedirectStandardError = $true
-  $proc = [System.Diagnostics.Process]::Start($psi)
-  $stdout = $proc.StandardOutput.ReadToEnd()
-  $stderr = $proc.StandardError.ReadToEnd()
-  $proc.WaitForExit()
-  if ($stdout) { Write-Host $stdout }
-  if ($stderr) { Write-Host $stderr -ForegroundColor DarkYellow }
-  if ($proc.ExitCode -ne 0) {
-    throw "Command failed (exit=$($proc.ExitCode)): $Cmd"
+# Runs python with direct console I/O (no redirection), throws on non-zero exit
+function Run-Py([string[]]$Argv) {
+  Write-Host ">> python $($Argv -join ' ')"
+  & python @Argv
+  $code = $LASTEXITCODE
+  if ($code -ne 0) {
+    throw "Command failed (exit=$code): python $($Argv -join ' ')"
   }
 }
 
-# 1) Train
-$framesArg = "$Frame_Min-$Frame_Max"
-$trainArgs = @(
-  "python .\ta_train_masked.py",
-  "-s `"$B_Dataset_Root`"",
-  "-o `"$B_Model_Root`"",
-  "--frames $framesArg",
-  "--mask_mode aabb_only",
-  "--aabb `"$AABB_Json`"",
-  "--save_mask_png",
-  "--aabb_close_px 1 --close_px 1 --dilate_px 2",
-  "--masked",
-  "--",
-  "--iterations 6000 -r 1 --sh_degree 3",
-  "--densify_from_iter 800 --densify_until_iter 3200",
-  "--densification_interval 400 --densify_grad_threshold 5e-4",
-  "--opacity_reset_interval 10000 --lambda_dssim 0.10",
-  "--depth_l1_weight_init 0 --depth_l1_weight_final 0",
-  "--test_iterations 999999 --save_iterations 999999",
-  "--optimizer_type sparse_adam"
-)
-if (-not $NoViewer) { $trainArgs += "--disable_viewer" }
-$cmdTrain = ($trainArgs -join " ")
+# Run from script directory
+Set-Location -LiteralPath (Split-Path -Parent $MyInvocation.MyCommand.Path)
 
-Step "1) Train frames $framesArg (masked AABB)" { Run-Cmd $cmdTrain }
+# Common paths
+$OutRoot    = Join-Path (Get-Location) ("output_seq\" + $Out_Name)
+$PackedRoot = Join-Path (Get-Location) "output_seq_packed"
+$ServeDir   = Join-Path $PackedRoot $Out_Name
 
-# 2) Merge
-$mergeArgs = @(
-  "python .\merge_A_B_batch.py",
-  "--a_ply `"$A_Ply`"",
-  "--b_root `"$B_Model_Root`"",
-  "--out_root `"$Out_Root`"",
-  "--feature_align pad",
-  "--mask_ext .png --mask_dilate_px 0 --min_views 25 --subsample_cams 0"
-)
-$cmdMerge = ($mergeArgs -join " ")
-Step "2) Merge A + B (mask voting) → $Out_Root" { Run-Cmd $cmdMerge }
+# (1) Train
+if (-not $SkipTrain) {
+  Write-Host "========== 1) Train frames $Frame_Min-$Frame_Max (masked AABB) =========="
 
-# 3) Pack merged
-$packArgs = @(
-  "python .\ta_pack.py",
-  "--merged_root `"$Out_Root`"",
-  "--name `"$Out_Name`"",
-  "--out `"$Packed_Base`"",
-  "--autocreate"
-)
-$cmdPack = ($packArgs -join " ")
-Step "3) Pack merged → $Packed_Root" { Run-Cmd $cmdPack }
+  $trainArgv = @(
+    ".\ta_train_masked.py",
+    "-s", $B_Dataset_Root,
+    "-o", $B_Model_Root,
+    "--frames", "$Frame_Min-$Frame_Max",
+    "--mask_mode", "aabb_only",
+    "--aabb", $AABB_Json,
+    "--aabb_close_px", "1", "--close_px", "1", "--dilate_px", "2",
+    "--",
+    "--iterations", "8000",
+    "-r", "1",
+    "--sh_degree", "3",
+    "--densify_from_iter", "2500",
+    "--densify_until_iter", "4500",
+    "--densification_interval", "600",
+    "--densify_grad_threshold", "1e-3",
+    "--opacity_reset_interval", "10000",
+    "--lambda_dssim", "0.15",
+    "--depth_l1_weight_init", "0",
+    "--depth_l1_weight_final", "0",
+    "--test_iterations", "999999",
+    "--save_iterations", "999999",
+    "--optimizer_type", "sparse_adam",
+    "--disable_viewer"
+  )
+  Run-Py $trainArgv
+} else {
+  Write-Host "[skip] train"
+}
 
-# 4) Serve
-$serveArgs = @(
-  "python .\server\ta_server_slots.py",
-  "-p `"$Packed_Root`"",
-  "--prefix model_frame_",
-  "--slots $Slots --warmup --neighbor_prefetch",
-  "--camera_json `"$Camera_Json`"",
-  "--host $BindHost --port $Port"
-)
-$cmdServe = ($serveArgs -join " ")
-# escape colon in title to avoid $var: parsing
-$hostPort = "$($BindHost)`:$Port"
-Step "4) Serve $Packed_Root on $hostPort" { Run-Cmd $cmdServe }
+# (2) Merge
+if (-not $SkipMerge) {
+  Write-Host "========== 2) Merge A + B (multiview mask voting) =========="
+
+  if (-not (Test-Path $OutRoot)) { New-Item -ItemType Directory -Force -Path $OutRoot | Out-Null }
+
+  $mergeArgv = @(
+    ".\merge_A_B_batch.py",
+    "--a_ply", $A_Ply,
+    "--b_model_root", $B_Model_Root,
+    "--b_dataset_root", $B_Dataset_Root,
+    "--out_root", $OutRoot,
+    "--aabb_json", $AABB_Json,
+    "--shrink_m", "0.0",
+    "--feather_m", "0.0",
+    "--cull_outside",
+    "--cull_box", "orig",
+    "--feature_align", "pad",
+    "--mask_ext", ".png",
+    "--mask_dilate_px", "0",
+    "--min_views", "25",
+    "--subsample_cams", "0",
+    "--gt_ext", ".png", "--a_ext", ".png",
+    "--thr", "25", "--blur_px", "0", "--open_px", "0", "--close_px", "1", "--dilate_px", "5"
+  )
+
+  if ($A_Images_Root -and ($A_Images_Root.Trim() -ne "")) {
+    $mergeArgv += @("--a_images_root", $A_Images_Root)
+  } elseif ($A_Images_Single -and ($A_Images_Single.Trim() -ne "")) {
+    $mergeArgv += @("--a_images_single", $A_Images_Single)
+  } else {
+    Write-Host "[warn] no A images provided; assuming residual masks already exist for each frame."
+  }
+
+  Run-Py $mergeArgv
+} else {
+  Write-Host "[skip] merge"
+}
+
+# (3) Pack
+if (-not $SkipPack) {
+  Write-Host "========== 3) Pack merged models =========="
+
+  if (-not (Test-Path $OutRoot)) {
+    throw "Merged root not found: $OutRoot (did you skip merge?)"
+  }
+  if (-not (Test-Path $PackedRoot)) { New-Item -ItemType Directory -Force -Path $PackedRoot | Out-Null }
+
+  $packArgv = @(
+    ".\pack\ta_pack.py",
+    "--merged_root", $OutRoot,
+    "--name", $Out_Name,
+    "--out", $PackedRoot,
+    "--autocreate"
+  )
+  Run-Py $packArgv
+} else {
+  Write-Host "[skip] pack"
+}
+
+# (4) Serve (blocking, full console output; Ctrl+C to stop)
+if (-not $SkipServe) {
+  Write-Host "========== 4) Serve $ServeDir on $ServeHost`:$Port =========="
+
+  if (-not (Test-Path $ServeDir)) {
+    throw "Serve directory not found: $ServeDir (pack output missing?)"
+  }
+
+  $serveArgv = @(
+    "-u", ".\server\ta_server_slots.py",
+    "-p", $ServeDir,
+    "--prefix", "model_frame_",
+    "--slots", "4",
+    "--warmup",
+    "--neighbor_prefetch",
+    "--host", $ServeHost,
+    "--port", "$Port"
+  )
+  if ($Camera_Json -and ($Camera_Json.Trim() -ne "")) {
+    $serveArgv += @("--camera_json", $Camera_Json)
+  }
+
+  Run-Py $serveArgv
+} else {
+  Write-Host "[skip] serve"
+}

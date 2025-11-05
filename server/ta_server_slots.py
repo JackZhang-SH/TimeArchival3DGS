@@ -165,25 +165,61 @@ def build_minicam(cam_dict):
     return MiniCam(W, H, fovy, fovx, znear, zfar, world_view, full)
 
 
-# -----------------------------------------------------------------------------
-# 5) 发现打包帧 & CPU 预载
-# -----------------------------------------------------------------------------
+
 def list_packed_frames(packed_root: Path, prefix: str):
-    frames = []; iters = {}
+    """
+    Discover packed frames under packed_root:
+
+    1) New (merged_root) layout:
+       <packed_root>/<prefix><n>/<prefix><n>.pt
+       e.g. output_seq_packed/soccer_merged/model_frame_3/model_frame_3.pt
+
+    2) Legacy layout:
+       <packed_root>/<prefix><n>/iter_XXXX.pt
+    """
+    frames = []
+    iters = {}
     for p in packed_root.iterdir():
-        if p.is_dir() and p.name.startswith(prefix):
-            try: f = int(p.name.split("_")[-1])
-            except: continue
-            best_it = -1; best = None
-            for q in p.iterdir():
-                if q.is_file() and q.name.startswith("iter_") and q.suffix==".pt":
-                    try:
-                        it = int(q.stem.split("_")[1])
-                        if it > best_it: best_it, best = it, q
-                    except: pass
-            if best is not None:
-                frames.append(f); iters[f] = (best_it, best)
-    frames.sort(); return frames, iters
+        if not p.is_dir():
+            continue
+        name = p.name
+        if not name.startswith(prefix):
+            continue
+        try:
+            f = int(name.split("_")[-1])
+        except Exception:
+            continue
+
+        # --- Preferred: merged-root style (model_frame_n.pt inside the same folder) ---
+        samefile = p / f"{name}.pt"
+        if samefile.exists() and samefile.is_file():
+            frames.append(f)
+            # Use iter=0 as a neutral label (we don't rely on it elsewhere)
+            iters[f] = (0, samefile)
+            continue
+
+        # --- Fallback: legacy iter_*.pt; pick the largest iter ---
+        best_it = -1
+        best = None
+        for q in p.iterdir():
+            if not q.is_file() or q.suffix != ".pt":
+                continue
+            stem = q.stem  # "iter_8000" or others
+            if stem.startswith("iter_"):
+                try:
+                    it = int(stem.split("_", 1)[1])
+                except Exception:
+                    continue
+                if it > best_it:
+                    best_it = it
+                    best = q
+        if best is not None:
+            frames.append(f)
+            iters[f] = (best_it, best)
+
+    frames.sort()
+    return frames, iters
+
 
 class CpuCache:
     def __init__(self, packed_map: dict[int, tuple[int, Path]]):
