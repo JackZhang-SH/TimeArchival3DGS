@@ -20,17 +20,17 @@ python ta_train.py -s dataset\soccer_dynamic_player_B -o ./output_seq/soccer_dyn
 Fast-12k（速度/质量平衡，推荐）
 python ta_train.py -s ./dataset/soccer_ellipse -o ./output_seq/soccer_ellipse --frames 1 -- --iterations 12000 -r 1 --sh_degree 3 --densify_from_iter 2000 --densify_until_iter 5000 --densification_interval 400 --densify_grad_threshold 7e-4 --opacity_reset_interval 8000 --depth_l1_weight_init 0 --depth_l1_weight_final 0 --test_iterations 999999 --save_iterations 999999 --disable_viewer
 
-python ta_train.py \
-  -s ./dataset/soccer_static_no_player_only_stadium \
-  -o ./output_seq \
-  --frames 1 \
-  -- \
-  --iterations 16000 -r 1 --lambda_dssim 0.2 \
-  --densify_from_iter 800 --densify_until_iter 9000 \
-  --densification_interval 120 \
-  --densify_grad_threshold 3e-4 \
-  --opacity_reset_interval 4000 \
-  --sh_degree 2 --disable_viewer
+python ta_train.py `
+  -s ./dataset/soccer_dynamic_player_B_70cams `
+  -o ./output_seq/soccer_dynamic_player_B_70cams `
+  --frames 1 `
+  -- `
+  --iterations 8000 -r 1 --lambda_dssim 0.2 `
+  --densify_from_iter 800 --densify_until_iter 9000 `
+  --densification_interval 120 `
+  --densify_grad_threshold 3e-4 `
+  --opacity_reset_interval 4000 
+  --sh_degree 2 --disable_viewer --optimizer_type sparse_adam
 
 
 gdown --id 1kq6b26OoOSPZXPCZCCnqICCKOgX5sUvd -O ./dataset --remaining-ok --continue
@@ -47,6 +47,7 @@ python pack\ta_pack.py `
   --single_ply .\output_seq\merged\frame_1\point_cloud.ply `
   --out_pt     .\output_seq_packed\merged\model_frame_1\iter_8000.pt `
   --autocreate
+
 python pack\pack.py --model output_seq\soccer_dynamic_player_original_train --out_pt output_seq_packed\soccer_dynamic_player_original_train\iter_8000.pt
 
 
@@ -62,19 +63,40 @@ python aabb_gui.py --pc ./dataset/soccer_static_no_player_only_stadium/frame_1/f
 python .\ta_train_masked.py `
   -s dataset\soccer_dynamic_player_B_70cams `
   -o .\output_seq\soccer_dynamic_player_B_70cams `
-  --frames 9 `
+  --frames 1 `
   --mask_mode aabb_only `
   --aabb .\aabb_B.json `
-  --aabb_close_px 2 --close_px 1 --dilate_px 1 `
   -- `
-  --iterations 8000 -r 1 --sh_degree 3 `
-  --densify_from_iter 2500 --densify_until_iter 4500 `
-  --densification_interval 600 --densify_grad_threshold 1e-3 `
-  --opacity_reset_interval 10000 --lambda_dssim 0.15 `
-  --depth_l1_weight_init 0 --depth_l1_weight_final 0 `
-  --test_iterations 999999 --save_iterations 999999 `
-  --disable_viewer --optimizer_type sparse_adam
+  --disable_viewer -r 1 --optimizer_type sparse_adam `
+  --iterations 8000 --position_lr_max_steps 8000 `
+  --densify_from_iter 300 --densify_until_iter 6000 `
+  --densification_interval 150 --densify_grad_threshold 1.6e-4 `
+  --opacity_reset_interval 1800 --lambda_dssim 0.18 `
+  --percent_dense 0.012 --test_iterations 999999 --save_iterations 999999 `
+  --depth_l1_weight_init 0 --depth_l1_weight_final 0 
 
+
+
+
+python .\ta_train_masked.py `
+  -s dataset\soccer_dynamic_player_B_70cams `
+  -o .\output_seq\soccer_dynamic_player_B_70cams `
+  --frames 1-2 `
+  --mask_mode aabb_only `
+  --aabb .\aabb_B.json `
+  -- `
+  --disable_viewer -r 1 --optimizer_type sparse_adam `
+  --iterations 8000 --position_lr_max_steps 8000 `
+  --densify_from_iter 300 --densify_until_iter 6000 `
+  --densification_interval 150 --densify_grad_threshold 1.6e-4 `
+  --opacity_reset_interval 1800 --lambda_dssim 0.18 `
+  --percent_dense 0.012 --test_iterations 999999 --save_iterations 999999 `
+  --depth_l1_weight_init 0 --depth_l1_weight_final 0  --test_images 0003.png 00042.png 0068.png
+
+python ta_test.py -s dataset\soccer_dynamic_player_B_70cams `
+  -m .\output_seq\soccer_dynamic_player_B_70cams --frames all --prefix frame_ `
+  --prefer_model_test_list --read_test_from_model_cfg `
+  --sparse_id 0 --iteration -1
 
 
 python .\make_residual_masks.py `
@@ -137,3 +159,5 @@ python server/ta_server_slots.py -p .\output_seq_packed\merged --prefix model_fr
   -Frame_Min 1 -Frame_Max 1 `
   -Out_Name "soccer_merged" `
   -Slots 4 -Port 7860 -BindHost "0.0.0.0" `
+
+

@@ -12,9 +12,7 @@ A-only renders    : EITHER
     (A) --a_images_root   -> frame_n/images  (per-frame root)
  OR (B) --a_images_single -> a single images folder reused for all frames
 Masks directory   : frame_n/masks_residual (use if exists; otherwise auto-make if A images provided)
-
-Output:
-  out_root/frame_n/point_cloud_merged.ply
+out_root/frame_n/point_cloud_merged/point_cloud.ply
 """
 
 import os, re, sys, json, random, subprocess
@@ -479,8 +477,10 @@ def main():
         print(f"[frame {n}] masks_dir  = {masks_dir}")
 
         out_dir = os.path.join(args.out_root, f"frame_{n}")
-        os.makedirs(out_dir, exist_ok=True)
-        out_ply = os.path.join(out_dir, "point_cloud_merged.ply")
+        out_pc_dir = os.path.join(out_dir, "point_cloud_merged")
+        os.makedirs(out_pc_dir, exist_ok=True)
+        out_ply = os.path.join(out_pc_dir, "point_cloud.ply")
+
 
         merge_one_frame(
             A, ply_path, out_ply, cams, masks_dir,

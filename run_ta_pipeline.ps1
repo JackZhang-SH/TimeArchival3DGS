@@ -47,38 +47,32 @@ $PackedRoot = Join-Path (Get-Location) "output_seq_packed"
 $ServeDir   = Join-Path $PackedRoot $Out_Name
 
 # (1) Train
-if (-not $SkipTrain) {
-  Write-Host "========== 1) Train frames $Frame_Min-$Frame_Max (masked AABB) =========="
+# if (-not $SkipTrain) {
+#   Write-Host "========== 1) Train frames $Frame_Min-$Frame_Max (masked AABB) =========="
 
-  $trainArgv = @(
-    ".\ta_train_masked.py",
-    "-s", $B_Dataset_Root,
-    "-o", $B_Model_Root,
-    "--frames", "$Frame_Min-$Frame_Max",
-    "--mask_mode", "aabb_only",
-    "--aabb", $AABB_Json,
-    "--aabb_close_px", "1", "--close_px", "1", "--dilate_px", "2",
-    "--",
-    "--iterations", "8000",
-    "-r", "1",
-    "--sh_degree", "3",
-    "--densify_from_iter", "2500",
-    "--densify_until_iter", "4500",
-    "--densification_interval", "600",
-    "--densify_grad_threshold", "1e-3",
-    "--opacity_reset_interval", "10000",
-    "--lambda_dssim", "0.15",
-    "--depth_l1_weight_init", "0",
-    "--depth_l1_weight_final", "0",
-    "--test_iterations", "999999",
-    "--save_iterations", "999999",
-    "--optimizer_type", "sparse_adam",
-    "--disable_viewer"
-  )
-  Run-Py $trainArgv
-} else {
-  Write-Host "[skip] train"
-}
+#   $trainArgv = @(
+#     ".\ta_train_masked.py",
+#     "-s", $B_Dataset_Root,
+#     "-o", $B_Model_Root,
+#     "--frames", "$Frame_Min-$Frame_Max",
+#     "--mask_mode", "aabb_only",
+#     "--aabb", $AABB_Json,
+#     "--aabb_close_px", "1", "--close_px", "1", "--dilate_px", "2",
+#     "--",
+#     "--disable_viewer", "-r", "1", "--optimizer_type", "sparse_adam",
+#     "--iterations", "6000", "--position_lr_max_steps", "6000",
+#     "--densify_from_iter", "300", "--densify_until_iter", "4800",
+#     "--densification_interval", "120", "--densify_grad_threshold", "1.5e-4",
+#     "--opacity_reset_interval", "1400", "--lambda_dssim", "0.18",
+#     "--percent_dense", "0.012",
+#     "--depth_l1_weight_init", "0", "--depth_l1_weight_final", "0",
+#     "--test_iterations", "999999",
+#     "--save_iterations", "999999"
+#   )
+#   Run-Py $trainArgv
+# } else {
+#   Write-Host "[skip] train"
+# }
 
 # (2) Merge
 if (-not $SkipMerge) {
