@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -30,7 +29,10 @@ Notes:
 - If --read_test_from_model_cfg is set, the script will try to parse
   each model's 'cfg_args' written by train.py to recover --test_images / --test_regex.
 - Metrics are printed per frame and for the whole set (weighted by the number of views).
+- Optional visualization:
+    --save_vis [--vis_root <dir>]  -> saves <vis_root>/<prefix><N>/<name>_{gt,render,side}.png
 """
+
 import argparse, json, math, os, re, sys, time
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -206,7 +208,6 @@ def _read_model_cfg_tests(model_dir: Path) -> Tuple[Optional[List[str]], Optiona
     return names, regex, clear_default
 
 
-
 def _read_test_list_file(model_dir: Path) -> Optional[list]:
     """Read <model_dir>/test_images.txt if present; return list of names (strings) or None."""
     txt = model_dir / "test_images.txt"
@@ -226,21 +227,23 @@ def _find_merged_ply(model_dir: Path) -> Optional[Path]:
       - <model_dir>/point_cloud_merged/point_cloud.ply
       - <model_dir>/point_cloud_merged/point_cloud_merged.ply
       - <model_dir>/point_cloud/merged/point_cloud.ply
+      - <model_dir>/point_cloud_merged.ply (flat copy)
     """
     cands = [
         model_dir / "point_cloud_merged" / "point_cloud.ply",
         model_dir / "point_cloud_merged" / "point_cloud_merged.ply",
         model_dir / "point_cloud" / "merged" / "point_cloud.ply",
+        model_dir / "point_cloud_merged.ply",
     ]
     for c in cands:
         if c.exists():
             return c
     return None
 
+
 def _choose_test_names(gt_images_dir: Path,
                        prefer_model_test_list: bool,
                        model_dir_for_list: Path,
-                       
                        cli_names: Optional[Sequence[str]],
                        cli_regex: Optional[str],
                        cli_list_txt: Optional[Path],
@@ -316,6 +319,26 @@ def _choose_test_names(gt_images_dir: Path,
     return names
 
 
+# ------------------------- Visualization helpers -------------------------
+def _tensor_to_pil_chw01(t: torch.Tensor) -> Image.Image:
+    """
+    t: torch.float32, shape (C,H,W), range [0,1]
+    return PIL.Image (RGB)
+    """
+    t = t.detach().cpu().clamp(0, 1)
+    return TF.to_pil_image(t)
+
+
+def _save_side_by_side(pil_left: Image.Image, pil_right: Image.Image, out_path: Path):
+    w = pil_left.width + pil_right.width
+    h = max(pil_left.height, pil_right.height)
+    canvas = Image.new("RGB", (w, h))
+    canvas.paste(pil_left, (0, 0))
+    canvas.paste(pil_right, (pil_left.width, 0))
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    canvas.save(str(out_path))
+
+
 # --------------------------------- Core testing --------------------------------
 def _resolve_ply(model_dir: Path, iteration: int) -> Path:
     it = iteration if iteration >= 0 else find_latest_iteration(model_dir)
@@ -339,7 +362,8 @@ def test_one_frame(frame_idx: int,
                    test_names: Sequence[str],
                    lpips_net: str = "vgg",
                    znear: float = 0.01, zfar: float = 100.0,
-                   limit: Optional[int] = None) -> Dict[str, float]:
+                   limit: Optional[int] = None,
+                   vis_dir: Optional[Path] = None) -> Dict[str, float]:
     # Prepare model
     ply = _resolve_ply(model_dir, iteration)
 
@@ -363,20 +387,24 @@ def test_one_frame(frame_idx: int,
         for name in tqdm(names_iter, desc=f"[frame {frame_idx}] Metric eval"):
             # Camera
             view = load_cam_from_colmap(gt_frame_dir, name, sparse_id, znear, zfar)
-
+            torch.cuda.synchronize()
+            t1 = time.perf_counter()
             # Render
             out = render(view, gauss, pipe, background, use_trained_exp=False,
                          separate_sh=SPARSE_ADAM_AVAILABLE)["render"]
-
+            t2 = time.perf_counter()
+            print("render time:", t2 - t1)
             # Load GT
             gt_path = images_dir / name
             gt_img = Image.open(str(gt_path))
-            t_out = TF.to_tensor(out.detach().clamp(0, 1).cpu())  # (C,H,W)
-            t_gt  = TF.to_tensor(gt_img)[:3, :, :]                # strip alpha
 
-            # Size sanity (should already match via COLMAP intrinsics)
+            # out 已是 CHW 的 torch.Tensor（CUDA），只需 clamp + to CPU 即可
+            t_out = out.detach().clamp(0, 1).cpu().to(torch.float32)   # (C,H,W)
+            # GT 用 to_tensor 转成 [0,1]，只取 RGB 三通道
+            t_gt  = TF.to_tensor(gt_img).to(torch.float32)[:3, :, :]
+
+            # Size sanity (should match via COLMAP intrinsics, but just in case)
             if t_out.shape[-2:] != t_gt.shape[-2:]:
-                # Resize GT to render (rare)
                 t_gt = TF.resize(t_gt, t_out.shape[-2:], antialias=True)
 
             # Metrics expect batched tensors on CUDA
@@ -385,6 +413,18 @@ def test_one_frame(frame_idx: int,
             ssims.append(float(ssim(b_out, b_gt)))
             psnrs.append(float(psnr(b_out, b_gt)))
             lpipss.append(float(lpips(b_out, b_gt, net_type=lpips_net)))
+
+            # 可视化保存（可选）
+            if vis_dir is not None:
+                vis_dir.mkdir(parents=True, exist_ok=True)
+                stem = Path(name).stem
+                pil_out = _tensor_to_pil_chw01(t_out)
+                pil_gt  = _tensor_to_pil_chw01(t_gt)
+                # 单图
+                pil_out.save(str(vis_dir / f"{stem}_render.png"))
+                pil_gt.save(str(vis_dir / f"{stem}_gt.png"))
+                # 左右拼接（左=GT，右=render）
+                _save_side_by_side(pil_gt, pil_out, vis_dir / f"{stem}_side.png")
 
     # Free model memory
     del gauss
@@ -423,6 +463,8 @@ def main(argv=None):
 
     # Output
     parser.add_argument("--save_json", type=str, default=None, help="Write full results to this JSON path")
+    parser.add_argument("--save_vis", action="store_true", help="Save GT/render/side-by-side images to a test folder for visual inspection")
+    parser.add_argument("--vis_root", type=str, default=None, help="Root dir to write visual outputs; defaults to <models_root>/_test_vis")
 
     # Allow pipeline params to be passed through
     pp = PipelineParams(parser)
@@ -441,6 +483,11 @@ def main(argv=None):
 
     # Extract pipeline
     pipe = pp.extract(args)
+
+    # 可视化输出根目录
+    vis_root = Path(args.vis_root).resolve() if (args.save_vis and args.vis_root) else (
+        (models_root / "_test_vis") if args.save_vis else None
+    )
 
     t0 = time.perf_counter()
     all_results: Dict[int, Dict[str, float]] = {}
@@ -475,11 +522,16 @@ def main(argv=None):
             print(f"[warn] No test images for frame {i}; skipping.")
             continue
 
+        # 每帧的可视化目录：<vis_root>/<prefix><i>
+        vis_dir = None
+        if vis_root is not None:
+            vis_dir = vis_root / f"{args.prefix}{i}"
+
         try:
             res = test_one_frame(
                 i, gt_frame_dir, model_dir, args.iteration, args.sparse_id,
                 pipe, args.sh_degree, args.white_background, names,
-                lpips_net=args.lpips_net, limit=args.limit
+                lpips_net=args.lpips_net, limit=args.limit, vis_dir=vis_dir
             )
         except Exception as e:
             print(f"[frame {i}][ERROR] {e}")

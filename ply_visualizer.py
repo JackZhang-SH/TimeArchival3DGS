@@ -142,4 +142,4 @@ def main():
 if __name__ == "__main__":
     main()
 
-#python ply_visualizer.py --ply dataset\soccer_dynamic_player_B\frame_9\sparse\0\points3D.ply --voxel 0.01 --every 1 --point-size 2.0 --bg white  --normals
+#python ply_visualizer.py --ply dataset\soccer_B_48cams\frame_1\fused_points.ply --voxel 0.01 --every 1 --point-size 2.0 --bg white  --normals

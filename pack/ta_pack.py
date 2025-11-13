@@ -29,6 +29,40 @@ import argparse, sys, math, shutil
 from pathlib import Path
 import numpy as np
 import torch
+from typing import Optional, Tuple
+def _find_merged_input_ply(frame_dir: Path) -> Tuple[Optional[Path], Optional[int], str]:
+    """
+    返回 (ply_path, iteration, layout_tag)
+      layout_tag in {"flat", "folder", "iter"}
+    优先级：flat > folder > iter(max)
+    """
+    # 1) 扁平：.../point_cloud_merged.ply
+    p_flat = frame_dir / "point_cloud_merged.ply"
+    if p_flat.exists():
+        return p_flat, None, "flat"
+
+    # 2) 子目录：.../point_cloud_merged/point_cloud.ply
+    p_folder = frame_dir / "point_cloud_merged" / "point_cloud.ply"
+    if p_folder.exists():
+        return p_folder, None, "folder"
+
+    # 3) 迭代结构：.../point_cloud/iteration_*/point_cloud.ply（取最大 iter）
+    pc = frame_dir / "point_cloud"
+    best_it, best_ply = -1, None
+    if pc.exists():
+        for d in pc.iterdir():
+            if d.is_dir() and d.name.startswith("iteration_"):
+                try:
+                    it = int(d.name.split("_")[1])
+                except:
+                    continue
+                p = d / "point_cloud.ply"
+                if p.exists() and it > best_it:
+                    best_it, best_ply = it, p
+    if best_ply is not None:
+        return best_ply, best_it, "iter"
+
+    return None, None, "none"
 
 # ---------- add project root to sys.path (go up to 5 levels) ----------
 def _add_repo_root():
@@ -275,14 +309,17 @@ def main():
         print(f"[ta_pack]  merged_root : {merged_root}")
         print(f"[ta_pack]  out_root    : {out_root}")
         for n, fdir in frames:
-            in_ply = fdir / "point_cloud_merged.ply"
-            if not in_ply.exists():
-                print(f"[ta_pack] skip frame {n}: missing {in_ply}")
+            in_ply, it_opt, kind = _find_merged_input_ply(fdir)
+            if not in_ply:
+                print(f"[ta_pack] skip frame {n}: no merged ply found under {fdir}")
                 continue
+
             out_dir = out_root / f"model_frame_{n}"
-            ensure_clean_dir(out_dir)  # <— always clean & recreate per-frame output
+            ensure_clean_dir(out_dir)
             out_pt  = out_dir / f"model_frame_{n}.pt"
-            print(f"[ta_pack] pack frame {n}:")
+
+            extra = f" (iter={it_opt})" if it_opt is not None else ""
+            print(f"[ta_pack] pack frame {n}: [{kind}]{extra}")
             print(f"          in  = {in_ply}")
             print(f"          out = {out_pt}")
             pack_one_frame(in_ply, out_pt)

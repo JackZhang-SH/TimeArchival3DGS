@@ -240,7 +240,11 @@ def build_work_dataset(src_frame_dir: Path, cache_dir: Path, work_dir: Path, inv
             raise FileNotFoundError(f"mask not found for {img_name} (stem={Path(img_name).stem} / idx={idx}) under {cache_dir}")
         out_png = out_images / f"{idx}.png"
         apply_mask_black_rgb(src_img, mask_path, out_png, invert=invert_masks)
-
+        masks_raw_dir = ensure_dir(work_dir / 'masks_raw')
+        dst_mask = masks_raw_dir / (out_png.stem + '.npy')
+        if not dst_mask.exists():
+            # mask_path 来自 cache_map[stem]；若 stem 与 out_png.stem 不同，复制为对齐的新文件名
+            shutil.copy2(mask_path, dst_mask)
         li = rec['line_index']; toks = new_lines[li].split()
         if len(toks) >= 10:
             toks[9] = out_png.name
@@ -270,6 +274,9 @@ def main(argv: List[str] | None = None) -> None:
     ap.add_argument('--', dest='dashdash', action='store_true', help=argparse.SUPPRESS)
     ap.add_argument('--cache_ref_frame', type=int, default=None,
                 help='仅使用该参考帧生成一次 AABB 掩码并复用到所有帧（不产生 _gen_frame_*）')
+    ap.add_argument('--set_aabb_env', action='store_true',
+                help='(optional) Also pass AABB_JSON to train.py to crop COLMAP sparse by AABB. Default: OFF.')
+
     argv = sys.argv[1:] if argv is None else argv
     if '--' in argv:
         dd = argv.index('--'); wrapper_args = argv[:dd]; train_flags = argv[dd+1:]
@@ -294,7 +301,6 @@ def main(argv: List[str] | None = None) -> None:
 
     if '--disable_viewer' not in train_flags:
         train_flags = train_flags + ['--disable_viewer']
-
     ensure_cache_masks(Path(args.aabb).resolve(), src_root, frames, cache_dir,
                     args.aabb_close_px, args.close_px, args.dilate_px,
                     ref_frame=args.cache_ref_frame)
@@ -336,8 +342,11 @@ def main(argv: List[str] | None = None) -> None:
             if args.dry_run: continue
             env = os.environ.copy()
             env.setdefault('PYTHONHASHSEED','0')
-            env['AABB_JSON'] = aabb_json
-            print(f"[train][env] AABB_JSON={env['AABB_JSON']}")
+            if args.set_aabb_env:
+                env['AABB_JSON'] = aabb_json
+                print(f"[train][env] AABB_JSON={env['AABB_JSON']}")
+            else:
+                print("[train][env] (no AABB_JSON) → will NOT crop sparse points")
             rc = subprocess.run(cmd, cwd=str(Path(__file__).resolve().parent), env=env, check=False).returncode
             if rc != 0:
                 print(f"[train][FAIL] frame_{p.frame} rc={rc}"); failed = 1; continue

@@ -536,7 +536,7 @@ if __name__ == "__main__":
     parser.add_argument("--disable_viewer", action="store_true", default=False)
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default=None)
-    # parser.add_argument("--masked", action="store_true", help="Use mask-aware ROI cropping and masked loss if masks_raw/<stem>.npy exists")
+    parser.add_argument("--masked", action="store_true", help="Use mask-aware ROI cropping and masked loss if masks_raw/<stem>.npy exists")
 
     # ---- TA: CLI for test split override (passed through from ta_train_masked.py after '--') ----
     parser.add_argument(

@@ -132,9 +132,13 @@ def aabb_projection_mask(lo, hi, q, tvec, intr, wh):
     dir_w_z = Rt[2, 0] * dc_x + Rt[2, 1] * dc_y + Rt[2, 2] * dc_z
 
     eps = 1e-12
-    inv_x = 1.0 / np.where(np.abs(dir_w_x) < eps, np.sign(dir_w_x) * eps + eps, dir_w_x)
-    inv_y = 1.0 / np.where(np.abs(dir_w_y) < eps, np.sign(dir_w_y) * eps + eps, dir_w_y)
-    inv_z = 1.0 / np.where(np.abs(dir_w_z) < eps, np.sign(dir_w_z) * eps + eps, dir_w_z)
+    def safe_inv(comp):
+        # 将分母钳到至少 eps（保留符号），避免 0
+        denom = np.where(comp >= 0.0, np.maximum(comp,  eps), np.minimum(comp, -eps))
+        return 1.0 / denom
+    inv_x = safe_inv(dir_w_x)
+    inv_y = safe_inv(dir_w_y)
+    inv_z = safe_inv(dir_w_z)
 
     t1x = (lo[0] - Cw[0]) * inv_x; t2x = (hi[0] - Cw[0]) * inv_x
     tminx = np.minimum(t1x, t2x);  tmaxx = np.maximum(t1x, t2x)

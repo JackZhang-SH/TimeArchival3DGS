@@ -11,8 +11,8 @@ COLMAP + GT imgs  : from B DATASET ROOT -> frame_n/sparse/0 and frame_n/images
 A-only renders    : EITHER
     (A) --a_images_root   -> frame_n/images  (per-frame root)
  OR (B) --a_images_single -> a single images folder reused for all frames
-Masks directory   : frame_n/masks_residual (use if exists; otherwise auto-make if A images provided)
-out_root/frame_n/point_cloud_merged/point_cloud.ply
+ Masks directory   : frame_n/masks_residual (use if exists; otherwise auto-make if A images provided)
+ Output            : out_root/<prefix>n/point_cloud_merged/point_cloud.ply  (default prefix='model_frame_')
 """
 
 import os, re, sys, json, random, subprocess
@@ -349,57 +349,141 @@ def ensure_masks_residual(frame_n, b_dataset_root, a_images_root, a_images_singl
         die(f"make_residual_masks.py failed for frame {frame_n} (exit={r.returncode})")
     return masks_dir
 
-# ---------- Merge one frame ----------
-def merge_one_frame(A, B_path, out_ply, cams, masks_dir,
-                    aabb_json=None, shrink_m=0.0, feather_m=0.0,
-                    cull_outside=False, cull_box="orig",
-                    feature_align="pad",
-                    mask_ext=".png", mask_dilate_px=0, min_views=2, subsample_cams=0):
-    import numpy as np
+def merge_one_frame(
+    A,
+    B_path,
+    out_ply,
+    cams,
+    masks_dir,
+    aabb_json=None,
+    shrink_m=0.0,
+    feather_m=0.0,
+    cull_outside=False,
+    cull_box="orig",
+    feature_align="pad",
+    mask_ext=".png",
+    mask_dilate_px=0,
+    min_views=2,
+    subsample_cams=0,
+    filtered_b_ply=None,
+):
+    """
+    Merge one frame of B with static A.
+
+    Steps:
+      1) Load B PLY.
+      2) (Optional) AABB-based feathering / culling on B.
+      3) Multiview mask voting on B.
+      4) Feature alignment between A and B (pad or trunc f_rest).
+      5) (Optional) Save filtered B-only PLY.
+      6) Concatenate A + B and write merged PLY.
+    """
+    import numpy as np, json
+
+    # ---- Load B ----
     B = read_ply_xyzcso(B_path)
-    print(f"[stat] B: {B['xyz'].shape[0]} points | f_rest={B['f_rest'].shape[1]} | {B_path}")
-
-    # (1) shrink+feather on B by AABB
-    if aabb_json:
-        with open(aabb_json, "r", encoding="utf-8") as f:
-            aabb_obj = json.load(f)
-        aabb_min, aabb_max = parse_aabb_any(aabb_obj)
-        print(f"[aabb] min={aabb_min.tolist()}  max={aabb_max.tolist()}")
-        feather_B_opacity_in_aabb(B, aabb_min, aabb_max, shrink_m=shrink_m, feather_m=feather_m)
-        if cull_outside:
-            cull_B_outside(B, aabb_min, aabb_max, shrink_m=shrink_m, mode=cull_box)
-
-    # (2) multiview mask voting on B
-    filter_B_by_multiview_masks(
-        B, cams,
-        masks_dir=masks_dir, mask_ext=mask_ext, mask_dilate_px=mask_dilate_px,
-        min_views=min_views, subsample_cams=subsample_cams
+    print(
+        f"[stat] B: {B['xyz'].shape[0]} points | "
+        f"f_rest={B['f_rest'].shape[1]} | {B_path}"
     )
 
-    # (3) feature alignment then concat
-    ar, br = A["f_rest"].shape[1], B["f_rest"].shape[1]
-    if ar != br:
-        if feature_align == "pad":
-            target = max(ar, br)
-            if ar < target:
-                A_pad = np.pad(A["f_rest"], ((0,0),(0,target-ar)), mode="constant")
-                A_use = dict(A); A_use["f_rest"] = A_pad
-            else:
-                A_use = A
-            if br < target:
-                B["f_rest"] = np.pad(B["f_rest"], ((0,0),(0,target-br)), mode="constant")
-            print(f"[align] PAD f_rest: A {ar}->{target}, B {br}->{target}")
-        else:
-            target = min(ar, br)
-            A_use = dict(A); A_use["f_rest"] = A["f_rest"][:, :target]
-            B["f_rest"] = B["f_rest"][:, :target]
-            print(f"[align] TRUNC f_rest to {target}")
-    else:
-        A_use = A
+    # ---- (1) AABB shrink + feather + optional cull ----
+    if aabb_json is not None:
+        with open(aabb_json, "r", encoding="utf-8") as f:
+            box = json.load(f)
+        aabb_min, aabb_max = parse_aabb_any(box)
+        print(
+            f"[AABB] min={aabb_min.tolist()} max={aabb_max.tolist()} "
+            f"shrink_m={shrink_m} feather_m={feather_m}"
+        )
 
-    OUT = { k: np.concatenate([A_use[k], B[k]], axis=0) for k in ["xyz","opacity","scale","rot","f_dc","f_rest"] }
+        # feather opacity inside AABB
+        if feather_m > 0.0 or shrink_m > 0.0:
+            feather_B_opacity_in_aabb(
+                B,
+                aabb_min=aabb_min,
+                aabb_max=aabb_max,
+                shrink_m=shrink_m,
+                feather_m=feather_m,
+            )
+
+        # optionally cull points outside the AABB
+        if cull_outside:
+            cull_B_outside(
+                B,
+                aabb_min=aabb_min,
+                aabb_max=aabb_max,
+                shrink_m=shrink_m,
+                mode=cull_box,
+            )
+
+    # ---- (2) Multiview mask voting (masks_residual) ----
+    if masks_dir is not None:
+        filter_B_by_multiview_masks(
+            B,
+            cams,
+            masks_dir,
+            mask_ext=mask_ext,
+            mask_dilate_px=mask_dilate_px,
+            min_views=min_views,
+            subsample_cams=subsample_cams,
+        )
+    else:
+        print("[mask vote] WARNING: masks_dir is None, skip voting")
+
+    # ---- (3) Feature alignment between A and B (f_rest) ----
+    ar, br = A["f_rest"].shape[1], B["f_rest"].shape[1]
+    print(f"[align] A.f_rest={ar}, B.f_rest={br}, mode={feature_align}")
+
+    if ar == br:
+        # No alignment needed
+        A_use = A
+    else:
+        if feature_align == "pad":
+            if ar < br:
+                # Pad A to match B
+                pad = np.zeros((A["xyz"].shape[0], br - ar), dtype=np.float32)
+                A_use = A.copy()
+                A_use["f_rest"] = np.concatenate([A["f_rest"], pad], axis=1)
+                print(
+                    f"[align] pad A.f_rest from {ar} -> {A_use['f_rest'].shape[1]}"
+                )
+            else:
+                # Pad B to match A
+                pad = np.zeros((B["xyz"].shape[0], ar - br), dtype=np.float32)
+                B["f_rest"] = np.concatenate([B["f_rest"], pad], axis=1)
+                A_use = A
+                print(
+                    f"[align] pad B.f_rest from {br} -> {B['f_rest'].shape[1]}"
+                )
+        elif feature_align == "trunc":
+            m = min(ar, br)
+            A_use = A.copy()
+            A_use["f_rest"] = A["f_rest"][:, :m]
+            B["f_rest"] = B["f_rest"][:, :m]
+            print(f"[align] truncate f_rest to {m} (A={ar}, B={br})")
+        else:
+            die(f"Unknown feature_align mode: {feature_align}")
+
+    # ---- (4) Optional: write filtered-B-only PLY ----
+    if filtered_b_ply is not None:
+        write_ply_xyzcso(filtered_b_ply, B)
+        print(
+            f"[filtered B] wrote: {filtered_b_ply} | "
+            f"N={B['xyz'].shape[0]}"
+        )
+
+    # ---- (5) Concatenate A + B and write merged PLY ----
+    OUT = {
+        k: np.concatenate([A_use[k], B[k]], axis=0)
+        for k in ["xyz", "opacity", "scale", "rot", "f_dc", "f_rest"]
+    }
     write_ply_xyzcso(out_ply, OUT)
-    print(f"[merge] wrote: {out_ply} | total N={OUT['xyz'].shape[0]} (A={A_use['xyz'].shape[0]} + B={B['xyz'].shape[0]})")
+    print(
+        f"[merge] wrote: {out_ply} | total N={OUT['xyz'].shape[0]} "
+        f"(A={A_use['xyz'].shape[0]} + B={B['xyz'].shape[0]})"
+    )
+
 
 # ---------- main ----------
 def main():
@@ -407,7 +491,8 @@ def main():
     ap.add_argument("--a_ply", required=True, help="Path to static A PLY")
     ap.add_argument("--b_model_root", required=True, help="Root containing model_frame_n for B (trained outputs)")
     ap.add_argument("--b_dataset_root", required=True, help="Dataset root containing frame_n with sparse/0 and images")
-    ap.add_argument("--out_root", required=True, help="Output root; will write out_root/frame_n/point_cloud_merged.ply")
+    ap.add_argument("--out_root", required=True, help="Output root; writes out_root/<prefix>n/point_cloud_merged/point_cloud.ply")
+    ap.add_argument("--prefix", type=str, default="model_frame_", help="Subfolder prefix under out_root (e.g., 'model_frame_' or 'frame_').")
     # A-only renders (choose one):
     ap.add_argument("--a_images_root", type=str, default=None, help="Root containing frame_n/images of A-only renders (per-frame)")
     ap.add_argument("--a_images_single", type=str, default=None, help="Single images folder of A-only renders reused for all frames")
@@ -431,6 +516,13 @@ def main():
     ap.add_argument("--mask_dilate_px", type=int, default=0)
     ap.add_argument("--min_views", type=int, default=25)
     ap.add_argument("--subsample_cams", type=int, default=0)
+    ap.add_argument(
+        "--filtered_b_root",
+        type=str,
+        default=None,
+        help="若提供，则为每个 frame 额外输出 filtered B-only PLY 到该根目录下：<prefix>n/point_cloud/iteration_0/point_cloud.ply"
+    )
+
     args = ap.parse_args()
     print("[args]", vars(args))
 
@@ -476,11 +568,22 @@ def main():
         print(f"[frame {n}] colmap_dir = {colmap_dir}")
         print(f"[frame {n}] masks_dir  = {masks_dir}")
 
-        out_dir = os.path.join(args.out_root, f"frame_{n}")
+        out_dir = os.path.join(args.out_root, f"{args.prefix}{n}")
         out_pc_dir = os.path.join(out_dir, "point_cloud_merged")
         os.makedirs(out_pc_dir, exist_ok=True)
         out_ply = os.path.join(out_pc_dir, "point_cloud.ply")
 
+        # NEW: filtered-B-only 输出路径
+        filtered_b_ply = None
+        if args.filtered_b_root:
+            fb_dir = os.path.join(
+                args.filtered_b_root,
+                f"{args.prefix}{n}",
+                "point_cloud",
+                "iteration_0"
+            )
+            os.makedirs(fb_dir, exist_ok=True)
+            filtered_b_ply = os.path.join(fb_dir, "point_cloud.ply")
 
         merge_one_frame(
             A, ply_path, out_ply, cams, masks_dir,
@@ -488,9 +591,22 @@ def main():
             cull_outside=args.cull_outside, cull_box=args.cull_box,
             feature_align=args.feature_align,
             mask_ext=args.mask_ext, mask_dilate_px=args.mask_dilate_px,
-            min_views=args.min_views, subsample_cams=args.subsample_cams
+            min_views=args.min_views, subsample_cams=args.subsample_cams,
+            filtered_b_ply=filtered_b_ply,   # NEW
         )
+        # [meta] propagate test list & cfg so ta_test can reuse the split
+        try:
+            import shutil
+            for name in ("test_images.txt", "cfg_args"):
+                src = os.path.join(model_frame_dir, name)
+                if os.path.isfile(src):
+                    dst = os.path.join(out_dir, name)
+                    shutil.copy2(src, dst)
+                    print(f"[meta] copied {name} → {dst}")
+        except Exception as e:
+            print(f"[meta][warn] failed to propagate test meta: {e}")
 
+            
 if __name__ == "__main__":
     try:
         main()
