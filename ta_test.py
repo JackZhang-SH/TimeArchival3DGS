@@ -1,36 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ta_test.py — Render a model on its test images and compute metrics (PSNR/SSIM/LPIPS).
+ta_test.py — Render a model on its test images and compute metrics (PSNR/SSIM/LPIPS),
+with detailed timing breakdown.
 
 Usage example:
   python ta_test.py -s ./dataset/soccer_dynamic_player_B --models_root ./output_seq \
       --frames 1-5 --prefix model_frame_ --read_test_from_model_cfg \
       --sparse_id 0 --iteration -1
-
-You can also explicitly set a test split:
-  # by names (exact file names or stems without extension)
-  python ta_test.py -s ./dataset/... -m ./output_seq --frames 3 \
-      --test_images 0001.png 0005.png 0012.png
-
-  # by regex (Python re applied to filename)
-  python ta_test.py -s ./dataset/... -m ./output_seq --frames all \
-      --test_regex "^(000[5-9]|001[0-2])\.png$"
-
-  # by list file (one name per line)
-  python ta_test.py -s ./dataset/... -m ./output_seq --frames 1 \
-      --test_list_txt ./test_images.txt
-
-Notes:
-- Ground-truth datasets are expected in COLMAP format per frame:
-    <gt_root>/frame_<N>/{images/, sparse/0/{cameras,images}.(txt|bin)}
-- Model folders are expected as:
-    <models_root>/<prefix><N>/point_cloud/iteration_*/point_cloud.ply
-- If --read_test_from_model_cfg is set, the script will try to parse
-  each model's 'cfg_args' written by train.py to recover --test_images / --test_regex.
-- Metrics are printed per frame and for the whole set (weighted by the number of views).
-- Optional visualization:
-    --save_vis [--vis_root <dir>]  -> saves <vis_root>/<prefix><N>/<name>_{gt,render,side}.png
 """
 
 import argparse, json, math, os, re, sys, time
@@ -127,8 +104,12 @@ def load_cam_from_colmap(dataset_root: Path, image_name: str, sparse_id: int = 0
 
     # Assemble MiniCam
     from utils.graphics_utils import getWorld2View2, getProjectionMatrix  # lazy import
-    world_view = torch.tensor(getWorld2View2(R, T, np.array([0, 0, 0], dtype=np.float32), 1.0)).transpose(0, 1).cuda()
-    proj = getProjectionMatrix(znear=znear, zfar=zfar, fovX=fovx, fovY=fovy).transpose(0, 1).cuda()
+    world_view = torch.tensor(
+        getWorld2View2(R, T, np.array([0, 0, 0], dtype=np.float32), 1.0)
+    ).transpose(0, 1).cuda()
+    proj = getProjectionMatrix(
+        znear=znear, zfar=zfar, fovX=fovx, fovY=fovy
+    ).transpose(0, 1).cuda()
     full = (world_view.unsqueeze(0).bmm(proj.unsqueeze(0))).squeeze(0)
     view = MiniCam(width, height, fovy, fovx, znear, zfar, world_view, full)
     setattr(view, "image_name", extr.name)
@@ -250,7 +231,8 @@ def _choose_test_names(gt_images_dir: Path,
                        read_from_cfg: bool,
                        model_dir: Path) -> List[str]:
     # base pool
-    pool = sorted([p.name for p in gt_images_dir.glob("*") if p.suffix.lower() in (".png", ".jpg", ".jpeg")])
+    pool = sorted([p.name for p in gt_images_dir.glob("*")
+                   if p.suffix.lower() in (".png", ".jpg", ".jpeg")])
     stems = {Path(n).stem: n for n in pool}
 
     names: List[str] = []
@@ -308,7 +290,8 @@ def _choose_test_names(gt_images_dir: Path,
             except re.error:
                 print(f"[warn] invalid test_regex in cfg ignored: {cfg_regex}")
         if cfg_clear and not names:
-            # User explicitly cleared default set but didn't give anything: keep empty -> we'll warn below.
+            # User explicitly cleared default set but didn't give anything:
+            # keep empty -> we'll warn below.
             pass
 
     # 5) Fallback: if still empty, use all images
@@ -364,11 +347,25 @@ def test_one_frame(frame_idx: int,
                    znear: float = 0.01, zfar: float = 100.0,
                    limit: Optional[int] = None,
                    vis_dir: Optional[Path] = None) -> Dict[str, float]:
-    # Prepare model
+    """
+    Run evaluation on a single frame and return metrics + timing info.
+
+    Timing breakdown (per frame):
+      - model_load_time: PLY resolve + GaussianModel + load_ply
+      - colmap_time_total: sum of load_cam_from_colmap over all views
+      - render_time_total: sum of pure render() time (with CUDA sync)
+      - metrics_time_total: GT I/O + resize + PSNR/SSIM/LPIPS (with CUDA sync)
+    """
+    # ------------------------ Model loading timing ------------------------
+    t_model0 = time.perf_counter()
     ply = _resolve_ply(model_dir, iteration)
 
     gauss = GaussianModel(sh_degree)
     gauss.load_ply(str(ply), use_train_test_exp=False)
+    t_model1 = time.perf_counter()
+    model_load_time = t_model1 - t_model0
+    print(f"[frame {frame_idx}] Model loaded from {ply}")
+    print(f"[frame {frame_idx}] Model load time: {model_load_time:.4f} s")
 
     bg_color = [1, 1, 1] if white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -378,6 +375,11 @@ def test_one_frame(frame_idx: int,
     psnrs: List[float] = []
     lpipss: List[float] = []
 
+    # Timing accumulators
+    colmap_time_total = 0.0
+    render_time_total = 0.0
+    metrics_time_total = 0.0
+
     images_dir = gt_frame_dir / "images"
 
     # Optionally limit number of views
@@ -385,86 +387,145 @@ def test_one_frame(frame_idx: int,
 
     with torch.no_grad():
         for name in tqdm(names_iter, desc=f"[frame {frame_idx}] Metric eval"):
-            # Camera
+            # -------------------- COLMAP camera timing --------------------
+            t_cam0 = time.perf_counter()
             view = load_cam_from_colmap(gt_frame_dir, name, sparse_id, znear, zfar)
+            t_cam1 = time.perf_counter()
+            dt_cam = t_cam1 - t_cam0
+            colmap_time_total += dt_cam
+
+            # ------------------------ Render timing -----------------------
             torch.cuda.synchronize()
-            t1 = time.perf_counter()
-            # Render
-            out = render(view, gauss, pipe, background, use_trained_exp=False,
-                         separate_sh=SPARSE_ADAM_AVAILABLE)["render"]
-            t2 = time.perf_counter()
-            print("render time:", t2 - t1)
+            t_render0 = time.perf_counter()
+            out = render(
+                view, gauss, pipe, background,
+                use_trained_exp=False,
+                separate_sh=SPARSE_ADAM_AVAILABLE
+            )["render"]
+            torch.cuda.synchronize()
+            t_render1 = time.perf_counter()
+            dt_render = t_render1 - t_render0
+            render_time_total += dt_render
+
+            # ------------------------ Metrics timing ----------------------
+            t_metric0 = time.perf_counter()
+
             # Load GT
             gt_path = images_dir / name
             gt_img = Image.open(str(gt_path))
 
-            # out 已是 CHW 的 torch.Tensor（CUDA），只需 clamp + to CPU 即可
+            # out is CHW CUDA tensor in [0,1]
             t_out = out.detach().clamp(0, 1).cpu().to(torch.float32)   # (C,H,W)
-            # GT 用 to_tensor 转成 [0,1]，只取 RGB 三通道
-            t_gt  = TF.to_tensor(gt_img).to(torch.float32)[:3, :, :]
+            # GT as RGB float tensor in [0,1]
+            t_gt = TF.to_tensor(gt_img).to(torch.float32)[:3, :, :]
 
-            # Size sanity (should match via COLMAP intrinsics, but just in case)
+            # Ensure same size
             if t_out.shape[-2:] != t_gt.shape[-2:]:
                 t_gt = TF.resize(t_gt, t_out.shape[-2:], antialias=True)
 
             # Metrics expect batched tensors on CUDA
             b_out = t_out.unsqueeze(0).cuda()
-            b_gt  = t_gt.unsqueeze(0).cuda()
+            b_gt = t_gt.unsqueeze(0).cuda()
             ssims.append(float(ssim(b_out, b_gt)))
             psnrs.append(float(psnr(b_out, b_gt)))
             lpipss.append(float(lpips(b_out, b_gt, net_type=lpips_net)))
 
-            # 可视化保存（可选）
+            torch.cuda.synchronize()
+            t_metric1 = time.perf_counter()
+            dt_metric = t_metric1 - t_metric0
+            metrics_time_total += dt_metric
+
+            # ---------------------- Per-view debug print ------------------
+            print(
+                f"[frame {frame_idx}] view={name} | "
+                f"COLMAP={dt_cam:.4f}s, render={dt_render:.4f}s, metrics={dt_metric:.4f}s"
+            )
+
+            # Visualization (optional)
             if vis_dir is not None:
                 vis_dir.mkdir(parents=True, exist_ok=True)
                 stem = Path(name).stem
                 pil_out = _tensor_to_pil_chw01(t_out)
-                pil_gt  = _tensor_to_pil_chw01(t_gt)
-                # 单图
+                pil_gt = _tensor_to_pil_chw01(t_gt)
+                # Single images
                 pil_out.save(str(vis_dir / f"{stem}_render.png"))
                 pil_gt.save(str(vis_dir / f"{stem}_gt.png"))
-                # 左右拼接（左=GT，右=render）
+                # Side-by-side (left = GT, right = render)
                 _save_side_by_side(pil_gt, pil_out, vis_dir / f"{stem}_side.png")
 
     # Free model memory
     del gauss
     torch.cuda.empty_cache()
 
-    # Aggregate
+    num_views = len(names_iter)
+    avg_colmap = colmap_time_total / num_views if num_views > 0 else 0.0
+    avg_render = render_time_total / num_views if num_views > 0 else 0.0
+    avg_metrics = metrics_time_total / num_views if num_views > 0 else 0.0
+
+    print(f"\n[frame {frame_idx}] Timing summary (views={num_views}):")
+    print(f"  Model load      : {model_load_time:.4f} s")
+    print(f"  COLMAP cameras  : {colmap_time_total:.4f} s "
+          f"(avg {avg_colmap:.4f} s/view)")
+    print(f"  Rendering       : {render_time_total:.4f} s "
+          f"(avg {avg_render:.4f} s/view)")
+    print(f"  Metrics + GT I/O: {metrics_time_total:.4f} s "
+          f"(avg {avg_metrics:.4f} s/view)\n")
+
+    # Aggregate metrics
     res = {
-        "count": len(names_iter),
+        "count": num_views,
         "SSIM": float(np.mean(ssims)) if ssims else 0.0,
         "PSNR": float(np.mean(psnrs)) if psnrs else 0.0,
         "LPIPS": float(np.mean(lpipss)) if lpipss else 0.0,
+        "timing": {
+            "model_load_sec": model_load_time,
+            "colmap_sec": colmap_time_total,
+            "render_sec": render_time_total,
+            "metrics_sec": metrics_time_total,
+        },
     }
     return res
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser("ta_test.py — Evaluate frames' test images against GT")
-    parser.add_argument("-s", "--gt_root", required=True, type=str, help="GT dataset root (with frame_* subfolders)")
-    parser.add_argument("-m", "--models_root", required=True, type=str, help="Models root (with model_frame_* subfolders)")
-    parser.add_argument("--frames", type=str, default="all", help="e.g., all | 1-5 | 1,3,7")
+    parser = argparse.ArgumentParser("ta_test.py — Evaluate frames' test images against GT (with timing)")
+    parser.add_argument("-s", "--gt_root", required=True, type=str,
+                        help="GT dataset root (with frame_* subfolders)")
+    parser.add_argument("-m", "--models_root", required=True, type=str,
+                        help="Models root (with model_frame_* subfolders)")
+    parser.add_argument("--frames", type=str, default="all",
+                        help="e.g., all | 1-5 | 1,3,7")
     parser.add_argument("--prefix", type=str, default="model_frame_")
-    parser.add_argument("--per_frame_subdir", type=str, default=None, help="If your models are under per-frame subdir (e.g., point_cloud_merged)")
-    parser.add_argument("--iteration", type=int, default=-1, help="-1 = auto-detect latest iteration_*")
+    parser.add_argument("--per_frame_subdir", type=str, default=None,
+                        help="If your models are under per-frame subdir (e.g., point_cloud_merged)")
+    parser.add_argument("--iteration", type=int, default=-1,
+                        help="-1 = auto-detect latest iteration_*")
     parser.add_argument("--sparse_id", type=int, default=0)
     parser.add_argument("--sh_degree", type=int, default=3)
     parser.add_argument("--white_background", action="store_true")
     parser.add_argument("--lpips_net", choices=["vgg", "alex", "squeeze"], default="vgg")
-    parser.add_argument("--prefer_model_test_list", action="store_true", help="Use <model_dir>/test_images.txt when present.")
-    parser.add_argument("--limit", type=int, default=None, help="Optionally limit views per frame for a quick pass")
+    parser.add_argument("--prefer_model_test_list", action="store_true",
+                        help="Use <model_dir>/test_images.txt when present.")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="Optionally limit views per frame for a quick pass")
 
     # Test split controls (CLI)
-    parser.add_argument("--test_images", nargs="+", default=None, help="Explicit test images (names or stems)")
-    parser.add_argument("--test_regex", type=str, default=None, help="Regex on file name to select test images")
-    parser.add_argument("--test_list_txt", type=str, default=None, help="A text file listing test images (one per line)")
-    parser.add_argument("--read_test_from_model_cfg", action="store_true", help="Try to read test split from each model's cfg_args")
+    parser.add_argument("--test_images", nargs="+", default=None,
+                        help="Explicit test images (names or stems)")
+    parser.add_argument("--test_regex", type=str, default=None,
+                        help="Regex on file name to select test images")
+    parser.add_argument("--test_list_txt", type=str, default=None,
+                        help="A text file listing test images (one per line)")
+    parser.add_argument("--read_test_from_model_cfg", action="store_true",
+                        help="Try to read test split from each model's cfg_args")
 
     # Output
-    parser.add_argument("--save_json", type=str, default=None, help="Write full results to this JSON path")
-    parser.add_argument("--save_vis", action="store_true", help="Save GT/render/side-by-side images to a test folder for visual inspection")
-    parser.add_argument("--vis_root", type=str, default=None, help="Root dir to write visual outputs; defaults to <models_root>/_test_vis")
+    parser.add_argument("--save_json", type=str, default=None,
+                        help="Write full results to this JSON path")
+    parser.add_argument("--save_vis", action="store_true",
+                        help="Save GT/render/side-by-side images to a test folder for visual inspection")
+    parser.add_argument("--vis_root", type=str, default=None,
+                        help="Root dir to write visual outputs; defaults to <models_root>/_test_vis")
 
     # Allow pipeline params to be passed through
     pp = PipelineParams(parser)
@@ -484,7 +545,7 @@ def main(argv=None):
     # Extract pipeline
     pipe = pp.extract(args)
 
-    # 可视化输出根目录
+    # Visualization root
     vis_root = Path(args.vis_root).resolve() if (args.save_vis and args.vis_root) else (
         (models_root / "_test_vis") if args.save_vis else None
     )
@@ -493,6 +554,12 @@ def main(argv=None):
     all_results: Dict[int, Dict[str, float]] = {}
     global_ssim_sum = global_psnr_sum = global_lpips_sum = 0.0
     global_count = 0
+
+    # Global timing accumulators
+    total_model_load = 0.0
+    total_colmap = 0.0
+    total_render = 0.0
+    total_metrics = 0.0
 
     for i in frames:
         gt_frame_dir = gt_root / f"frame_{i}"
@@ -516,13 +583,13 @@ def main(argv=None):
             args.test_regex,
             Path(args.test_list_txt) if args.test_list_txt else None,
             args.read_test_from_model_cfg,
-            model_dir
+            model_dir,
         )
         if not names:
             print(f"[warn] No test images for frame {i}; skipping.")
             continue
 
-        # 每帧的可视化目录：<vis_root>/<prefix><i>
+        # Per-frame visualization dir: <vis_root>/<prefix><i>
         vis_dir = None
         if vis_root is not None:
             vis_dir = vis_root / f"{args.prefix}{i}"
@@ -543,7 +610,16 @@ def main(argv=None):
         global_lpips_sum += res["LPIPS"] * res["count"]
         global_count += res["count"]
 
-        print(f"\n[frame {i}] views={res['count']}  SSIM={res['SSIM']:.6f}  PSNR={res['PSNR']:.6f}  LPIPS={res['LPIPS']:.6f}")
+        timing = res.get("timing", {})
+        total_model_load += float(timing.get("model_load_sec", 0.0))
+        total_colmap += float(timing.get("colmap_sec", 0.0))
+        total_render += float(timing.get("render_sec", 0.0))
+        total_metrics += float(timing.get("metrics_sec", 0.0))
+
+        print(
+            f"\n[frame {i}] views={res['count']}  "
+            f"SSIM={res['SSIM']:.6f}  PSNR={res['PSNR']:.6f}  LPIPS={res['LPIPS']:.6f}"
+        )
 
     dt = time.perf_counter() - t0
 
@@ -551,16 +627,49 @@ def main(argv=None):
         g_ssim = global_ssim_sum / global_count
         g_psnr = global_psnr_sum / global_count
         g_lpips = global_lpips_sum / global_count
-        print("\n================= [TOTAL] =================")
+        print("\n================= [TOTAL METRICS] =================")
         print(f"Total views = {global_count}")
         print(f"SSIM  = {g_ssim:.7f}")
         print(f"PSNR  = {g_psnr:.7f}")
         print(f"LPIPS = {g_lpips:.7f}")
-        print(f"Time  = {dt:.3f} s")
-        global_result = {"count": global_count, "SSIM": g_ssim, "PSNR": g_psnr, "LPIPS": g_lpips, "time_sec": dt}
+
+        print("\n================= [TOTAL TIMING] ==================")
+        print(f"Total wall time          : {dt:.3f} s")
+        print(f"  Model loading (sum)    : {total_model_load:.3f} s")
+        print(f"  COLMAP cameras (sum)   : {total_colmap:.3f} s")
+        print(f"  Rendering (sum)        : {total_render:.3f} s")
+        print(f"  Metrics + GT I/O (sum) : {total_metrics:.3f} s")
+        accounted = total_model_load + total_colmap + total_render + total_metrics
+        print(f"  Other overhead (approx): {max(0.0, dt - accounted):.3f} s")
+        print(f"\nPer-view averages (over all frames/views):")
+        print(f"  Render only            : {total_render / global_count:.5f} s/view")
+        print(f"  COLMAP + render        : {(total_colmap + total_render) / global_count:.5f} s/view")
+        print(f"  Full pipeline          : {dt / global_count:.5f} s/view")
+
+        global_result = {
+            "count": global_count,
+            "SSIM": g_ssim,
+            "PSNR": g_psnr,
+            "LPIPS": g_lpips,
+            "time_sec": dt,
+            "timing_breakdown": {
+                "model_load_sec": total_model_load,
+                "colmap_sec": total_colmap,
+                "render_sec": total_render,
+                "metrics_sec": total_metrics,
+                "other_overhead_sec": max(0.0, dt - accounted),
+            },
+        }
     else:
         print("\n[WARN] No frames evaluated.")
-        global_result = {"count": 0, "SSIM": 0.0, "PSNR": 0.0, "LPIPS": 0.0, "time_sec": dt}
+        global_result = {
+            "count": 0,
+            "SSIM": 0.0,
+            "PSNR": 0.0,
+            "LPIPS": 0.0,
+            "time_sec": dt,
+            "timing_breakdown": {},
+        }
 
     if args.save_json:
         out = {"frames": all_results, "global": global_result}
