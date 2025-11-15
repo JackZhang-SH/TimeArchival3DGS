@@ -112,7 +112,7 @@ def _masked_l1_and_ssim(image, gt_image, mask_hw, roi, lambda_dssim, fused_ssim_
     return Ll1, ssim_value
 
 
-def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
+def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, reset_checkpoint_iter: bool = False,):
     # Cache for (mask_hw, roi) per image_name to avoid per-iter np.load/roi compute
     mask_cache = {}
 
@@ -194,8 +194,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     # ---- end TA block ----
 
     if checkpoint:
-        (model_params, first_iter) = torch.load(checkpoint)
+        model_params, ckpt_iter = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
+        # reset_checkpoint_iter=True 表示：忽略保存的迭代号，把 checkpoint 当作“初始化”
+        first_iter = 0 if reset_checkpoint_iter else ckpt_iter
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -537,7 +539,11 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default=None)
     parser.add_argument("--masked", action="store_true", help="Use mask-aware ROI cropping and masked loss if masks_raw/<stem>.npy exists")
-
+    parser.add_argument(
+        "--reset_start_iter",
+        action="store_true",
+        help="When resuming from --start_checkpoint, ignore stored iteration and restart schedule from 0.",
+    )
     # ---- TA: CLI for test split override (passed through from ta_train_masked.py after '--') ----
     parser.add_argument(
         "--test_images",
@@ -592,6 +598,7 @@ if __name__ == "__main__":
         args.checkpoint_iterations,
         args.start_checkpoint,
         args.debug_from,
+        args.reset_start_iter,
     )
 
     print("\nTraining complete.")

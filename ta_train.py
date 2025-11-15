@@ -2,9 +2,10 @@
 # -*- coding: utf-8 -*-
 """
 Time Archival 3DGS — Robust Batch Trainer (process isolation)
-Trains N independent 3DGS models by spawning a fresh Python process per frame.
+Trains N independent (or warm-chained) 3DGS models by spawning a fresh Python process per frame.
 
 Examples:
+  # Standard per-frame training (independent models)
   python ta_train.py -s ./dataset -o ./output_seq --frames 1-50 -- \
       --disable_viewer -r 2 --densify_from_iter 1500 --densify_until_iter 5000 \
       --densification_interval 200 --densify_grad_threshold 5e-4 \
@@ -13,6 +14,11 @@ Examples:
 Notes:
 - Everything after the first literal "--" is forwarded verbatim to train.py.
 - Each frame is trained in an isolated subprocess to avoid cross-frame state carryover.
+- With --warm_chain, we automatically:
+    * parse --iterations N
+    * append --checkpoint_iterations N
+    * after each frame i, use model_frame_i/chkpntN.pth as
+      --start_checkpoint (plus --reset_start_iter) for frame i+1.
 """
 
 from __future__ import annotations
@@ -42,10 +48,24 @@ def _ensure_flag(flags: List[str], name: str, takes_value: bool = False, default
 
 def _has_flag(flags: List[str], name: str) -> bool:
     try:
-        idx = flags.index(name)
+        _ = flags.index(name)
         return True
     except ValueError:
         return False
+
+
+def _get_flag_value(flags: List[str], name: str) -> str | None:
+    """
+    Return the value immediately following `name` in flags, or None if not present.
+    Example: ["--iterations", "6400", "--foo", "bar"] -> _get_flag_value(..., "--iterations") == "6400"
+    """
+    try:
+        idx = flags.index(name)
+    except ValueError:
+        return None
+    if idx + 1 >= len(flags):
+        return None
+    return flags[idx + 1]
 
 
 def parse_frames(frames_expr: str, dataset_root: Path) -> List[int]:
@@ -120,6 +140,11 @@ def main(argv: List[str]) -> None:
     wrapper.add_argument("--dry-run", action="store_true", help="Print commands only, do not execute.")
     wrapper.add_argument("--jobs", type=int, default=1,
                          help="Reserved for future parallelism (currently sequential).")
+    wrapper.add_argument(
+        "--warm_chain",
+        action="store_true",
+        help="Use previous frame's checkpoint as --start_checkpoint for the next frame (sequential warm-start).",
+    )
     # sentinel to split args
     wrapper.add_argument("--", dest="dashdash", action="store_true", help=argparse.SUPPRESS)
 
@@ -139,13 +164,37 @@ def main(argv: List[str]) -> None:
     out_root.mkdir(parents=True, exist_ok=True)
 
     frames = parse_frames(args.frames, src_root)
+    # For warm_chain, ensure frames are trained in temporal order
+    if args.warm_chain:
+        frames = sorted(frames)
     print(f"[TA-Train] Frames to train: {frames}")
 
     # Always disable viewer unless user explicitly passed it
     if not _has_flag(train_flags, "--disable_viewer"):
         train_flags = _ensure_flag(train_flags, "--disable_viewer", takes_value=False)
 
+    # If we are chaining, we need to (1) know --iterations; (2) force a checkpoint at that iteration.
+    base_train_flags = train_flags
+    final_iter = None
+    if args.warm_chain:
+        it_str = _get_flag_value(base_train_flags, "--iterations")
+        if it_str is None:
+            print("[TA-Train][ERROR] --warm_chain requires that you pass --iterations N to train.py.")
+            sys.exit(1)
+        try:
+            final_iter = int(it_str)
+        except Exception:
+            print(f"[TA-Train][ERROR] Could not parse --iterations value '{it_str}' as int.")
+            sys.exit(1)
+
+        # Append a checkpoint at the final iteration (in addition to any user-specified ones)
+        base_train_flags = base_train_flags + ["--checkpoint_iterations", str(final_iter)]
+        if args.jobs != 1:
+            print("[TA-Train][WARN] --warm_chain currently assumes sequential jobs; ignoring --jobs > 1.")
+        print(f"[TA-Train] Warm-chain enabled: will use chkpnt{final_iter}.pth from each frame for the next frame.")
+
     results: List[FrameResult] = []
+    prev_ckpt: Path | None = None  # last frame's checkpoint for warm_chain
 
     for i in frames:
         ds_dir = src_root / f"frame_{i}"
@@ -160,20 +209,42 @@ def main(argv: List[str]) -> None:
             model_dir = model_dir / args.per_frame_subdir
         model_dir.mkdir(parents=True, exist_ok=True)
 
-        # Resume policy: if a checkpoint or trained artifact already exists, skip
         if args.resume_if_exists:
             ckpt_dir = model_dir / "chkpnt"
             gauss_ply = model_dir / "point_cloud" / "iteration_0" / "point_cloud.ply"
-            maybe_trained = ckpt_dir.exists() or gauss_ply.exists()
+
+            # Additionally check if there are top-level chkpnt*.pth files
+            top_ckpts = list(model_dir.glob("chkpnt*.pth"))
+
+            maybe_trained = ckpt_dir.exists() or gauss_ply.exists() or (len(top_ckpts) > 0)
             if maybe_trained:
                 print(f"[TA-Train] RESUME-SKIP frame_{i}: {model_dir}")
                 results.append(FrameResult(i, True, 0.0, str(model_dir), 0, None, cmd=None))
+
+                # For warm_chain: even when skipping training, try to continue the chain from an existing checkpoint
+                if args.warm_chain and final_iter is not None:
+                    ckpt_candidate = model_dir / f"chkpnt{final_iter}.pth"
+                    if ckpt_candidate.exists():
+                        prev_ckpt = ckpt_candidate
+                        print(f"[TA-Train][warm_chain] Using existing checkpoint for next frame: {ckpt_candidate}")
+                    else:
+                        print(
+                            f"[TA-Train][warm_chain][WARN] Expected checkpoint not found: {ckpt_candidate} "
+                            f"(next frame will NOT warm-start)."
+                        )
+                        prev_ckpt = None
                 continue
+
+        # Build train flags for this frame (inject --start_checkpoint if warm_chain & we have one)
+        frame_train_flags = list(base_train_flags)
+        if args.warm_chain and prev_ckpt is not None:
+            frame_train_flags += ["--start_checkpoint", str(prev_ckpt), "--reset_start_iter"]
+            print(f"[TA-Train][warm_chain] frame_{i}: warm-start from {prev_ckpt}")
 
         # Build command for subprocess
         cmd = [sys.executable, "-u", "train.py",  # -u: unbuffered for real-time logs
                "--source_path", str(ds_dir),
-               "--model_path", str(model_dir)] + train_flags
+               "--model_path", str(model_dir)] + frame_train_flags
 
         human_cmd = " ".join(shlex.quote(x) for x in cmd)
         print(f"[TA-Train][spawn] frame_{i} -> {human_cmd}")
@@ -188,20 +259,26 @@ def main(argv: List[str]) -> None:
         # Make runs reproducible-ish without touching the training code:
         # At least fix Python hashing; user can still pass seeds to train.py if supported.
         env.setdefault("PYTHONHASHSEED", "0")
-        # (Avoid inheriting any accidental experiment flags via env variables)
+        # Avoid inheriting any accidental experiment flags via env variables
         for k in ["TA_EXPERIMENT", "TA_EVAL", "TA_TRAIN_TEST_EXP"]:
             env.pop(k, None)
 
         try:
             # Run training in an isolated Python process
             import subprocess
-            proc = subprocess.run(cmd, env=env, cwd=str(Path(__file__).resolve().parent),
-                                  check=False)  # don't raise; we record status below
+            proc = subprocess.run(
+                cmd,
+                env=env,
+                cwd=str(Path(__file__).resolve().parent),
+                check=False  # don't raise; we record status below
+            )
             rc = proc.returncode
         except Exception as e:
             dt = time.time() - t0
             print(f"[TA-Train][ERROR] frame_{i}: spawn failed -> {e}")
             results.append(FrameResult(i, False, dt, str(model_dir), 3, str(e), human_cmd))
+            # If this frame fails to spawn, warm_chain cannot continue from it
+            prev_ckpt = None
             continue
 
         dt = time.time() - t0
@@ -211,21 +288,59 @@ def main(argv: List[str]) -> None:
 
         results.append(FrameResult(i, ok, dt, str(model_dir), rc, None if ok else "train_failed", human_cmd))
 
+        # For warm_chain: on success, try to record this frame's checkpoint for the next frame
+        if args.warm_chain and final_iter is not None and ok:
+            ckpt_candidate = model_dir / f"chkpnt{final_iter}.pth"
+            if ckpt_candidate.exists():
+                prev_ckpt = ckpt_candidate
+                print(f"[TA-Train][warm_chain] Saved checkpoint for next frame: {ckpt_candidate}")
+            else:
+                print(
+                    f"[TA-Train][warm_chain][WARN] Expected checkpoint not found after training: {ckpt_candidate} "
+                    f"(next frame will NOT warm-start)."
+                )
+                prev_ckpt = None
+        elif not ok:
+            # If the current frame failed, do not propagate a potentially bad checkpoint
+            prev_ckpt = None
+
         # No need to manually clear CUDA here; subprocess exit releases everything.
+
+    # Aggregate timing statistics
+    time_total_sec = sum(r.seconds for r in results)
+    trained_results = [r for r in results if r.seconds > 0.0]
+    num_trained_frames = len(trained_results)
+    avg_time_per_trained_frame_sec = (
+        time_total_sec / num_trained_frames if num_trained_frames > 0 else 0.0
+    )
 
     # Write a compact summary for bookkeeping
     summary = {
         "source_root": str(src_root),
         "output_root": str(out_root),
         "frames": frames,
-        "train_flags": train_flags,
+        "train_flags": base_train_flags,
         "results": [asdict(r) for r in results],
         "ok_frames": [r.frame for r in results if r.ok],
         "failed_frames": [r.frame for r in results if not r.ok],
-        "time_total_sec": sum(r.seconds for r in results),
+        "time_total_sec": time_total_sec,
+        "num_trained_frames": num_trained_frames,
+        "avg_time_per_trained_frame_sec": avg_time_per_trained_frame_sec,
+        "warm_chain": args.warm_chain,
+        "warm_chain_final_iter": final_iter,
     }
     with open(out_root / "summary.json", "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
+
+    # Print timing stats to stdout
+    print(f"[TA-Train][stats] Total training time (sum over executed frames): {time_total_sec:.2f}s")
+    if num_trained_frames > 0:
+        print(
+            f"[TA-Train][stats] Average time per trained frame: "
+            f"{avg_time_per_trained_frame_sec:.2f}s over {num_trained_frames} frame(s)"
+        )
+    else:
+        print("[TA-Train][stats] No frames were actually trained (all skipped or dry-run).")
 
     n_fail = len([r for r in results if not r.ok])
     if n_fail:

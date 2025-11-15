@@ -3,7 +3,7 @@
 python .\ta_train.py `
   -s dataset\soccer_B_60cams `
   -o .\output_seq\soccer_B_60cams `
-  --frames 1 `
+  --frames 2 `
   -- `
   --disable_viewer -r 1 `
   --optimizer_type sparse_adam `

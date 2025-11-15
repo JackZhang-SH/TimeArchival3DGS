@@ -2,7 +2,7 @@ cd /workspace
 apt-get update -y
 apt-get install -y wget bzip2 git build-essential
 git clone https://github.com/JackZhang-SH/TimeArchival3DGS.git
-cd TimeArchival3DGS
+
 
 # 下载当前稳定版（Python 3.x）
 wget -O miniconda.sh https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
@@ -13,6 +13,7 @@ bash miniconda.sh -b -p /workspace/miniconda3
 # 让 conda 命令生效（向 ~/.bashrc 写入初始化）
 /workspace/miniconda3/bin/conda init bash
 
+cd TimeArchival3DGS
 # 使当前会话立刻生效
 source ~/.bashrc
 conda create -n TimeArchival3DGS python=3.8
@@ -34,13 +35,13 @@ pip install --no-build-isolation --no-cache-dir ./submodules/simple-knn
 pip install --no-build-isolation --no-cache-dir ./submodules/fused-ssim
 
 gdown --folder --id 1tyQwIbsc0tbc3mU5CkFfj8k5h1LIsaK3 -O ./dataset/ --remaining-ok --continue
-gdown --id 1lIADbGpZwkEuAuwOVuL-cVbtYGIKxmP4 -O ./dataset/ --remaining-ok --continue
+gdown --id 1cPc1Bzb8JCZ9uQ_hARi_ebZS9KluhG2Q -O . --remaining-ok --continue
 
-https://drive.google.com/file/d/1lIADbGpZwkEuAuwOVuL-cVbtYGIKxmP4/view?usp=drive_link
-https://drive.google.com/drive/folders/1tyQwIbsc0tbc3mU5CkFfj8k5h1LIsaK3?usp=drive_link
+https://drive.google.com/file/d/1cPc1Bzb8JCZ9uQ_hARi_ebZS9KluhG2Q/view?usp=drive_link
 
-scp -r -C -P 45082 root@141.193.30.39:/workspace/TimeArchival3DGS/output_seq ./output_seq
-scp -r -P 45082 ./dataset/soccer_ellipse_demo_test/frame_1 root@141.193.30.39:/workspace/TimeArchival3DGS/dataset
+scp -r -C -P 47261 root@62.169.159.96:/workspace/TimeArchival3DGS/output_seq/soccer_merged_60cams/_test_vis ./results
+
+scp -r -P 47261 dataset\soccer_A_48cams root@62.169.159.96:/workspace/TimeArchival3DGS/dataset
 
 
 

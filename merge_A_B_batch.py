@@ -11,12 +11,20 @@ COLMAP + GT imgs  : from B DATASET ROOT -> frame_n/sparse/0 and frame_n/images
 A-only renders    : EITHER
     (A) --a_images_root   -> frame_n/images  (per-frame root)
  OR (B) --a_images_single -> a single images folder reused for all frames
- Masks directory   : frame_n/masks_residual (use if exists; otherwise auto-make if A images provided)
- Output            : out_root/<prefix>n/point_cloud_merged/point_cloud.ply  (default prefix='model_frame_')
+ Masks directory  : frame_n/masks_residual (use if exists; otherwise auto-make if A images provided)
+ Output           : out_root/<prefix>n/point_cloud_merged/point_cloud.ply  (default prefix='model_frame_')
+
+Timing:
+  - Per-frame breakdown is printed:
+      [time][frame n] masks_residual = X.XXX s
+      [time][frame n] merge+colmap   = Y.YYY s
+      [time][frame n] frame total    = Z.ZZZ s
+  - A final summary over all merged frames is printed at the end.
 """
 
-import os, re, sys, json, random, subprocess
+import os, re, sys, json, random, subprocess, time
 from argparse import ArgumentParser
+
 
 def die(msg, code=1):
     print(f"[error] {msg}")
@@ -56,7 +64,6 @@ def read_ply_xyzcso(path):
             f_list.append(v[name].astype("float32")[:,None]); k += 1
         else:
             break
-    import numpy as np
     f_rest = np.concatenate(f_list, axis=1) if f_list else np.zeros((xyz.shape[0],0), "float32")
     return dict(xyz=xyz, opacity=op, scale=sc, rot=rot, f_dc=f_dc, f_rest=f_rest)
 
@@ -314,13 +321,14 @@ def ensure_masks_residual(frame_n, b_dataset_root, a_images_root, a_images_singl
                           thr=25, blur_px=0, open_px=0, close_px=1, dilate_px=5):
     """Create masks_residual for this frame if missing.
        Priority:
-         1) if masks_residual exists -> return
+         1) if masks_residual exists -> reuse it
          2) else if a_images_root provided -> use a_images_root/frame_n/images
          3) else if a_images_single provided -> use that single images folder for all frames
          4) else -> error
     """
     masks_dir = os.path.join(b_dataset_root, f"frame_{frame_n}", "masks_residual")
     if not dir_empty_or_missing(masks_dir):
+        print(f"[auto-masks] frame {frame_n}: reuse existing masks_residual -> {masks_dir}")
         return masks_dir
 
     if a_images_root:
@@ -343,10 +351,13 @@ def ensure_masks_residual(frame_n, b_dataset_root, a_images_root, a_images_singl
         "--close_px", str(close_px),
         "--dilate_px", str(dilate_px),
     ]
-    print("[auto-masks]", " ".join(cmd))
+    print(f"[auto-masks][frame {frame_n}]", " ".join(cmd))
+    t0 = time.perf_counter()
     r = subprocess.run(cmd, stdout=sys.stdout, stderr=sys.stderr)
+    t1 = time.perf_counter()
     if r.returncode != 0:
         die(f"make_residual_masks.py failed for frame {frame_n} (exit={r.returncode})")
+    print(f"[auto-masks][frame {frame_n}] generated residual masks in {t1 - t0:.3f} s -> {masks_dir}")
     return masks_dir
 
 def merge_one_frame(
@@ -487,7 +498,10 @@ def merge_one_frame(
 
 # ---------- main ----------
 def main():
-    ap = ArgumentParser("Batch merge A with all B frames (max-iter PLY per frame), shrink+feather/cull, and multiview mask voting; auto-make residual masks if missing")
+    ap = ArgumentParser(
+        "Batch merge A with all B frames (max-iter PLY per frame), "
+        "shrink+feather/cull, and multiview mask voting; auto-make residual masks if missing"
+    )
     ap.add_argument("--a_ply", required=True, help="Path to static A PLY")
     ap.add_argument("--b_model_root", required=True, help="Root containing model_frame_n for B (trained outputs)")
     ap.add_argument("--b_dataset_root", required=True, help="Dataset root containing frame_n with sparse/0 and images")
@@ -496,7 +510,7 @@ def main():
     # A-only renders (choose one):
     ap.add_argument("--a_images_root", type=str, default=None, help="Root containing frame_n/images of A-only renders (per-frame)")
     ap.add_argument("--a_images_single", type=str, default=None, help="Single images folder of A-only renders reused for all frames")
-    # make_residual_masks options (default to single-frame example)
+    # make_residual_masks options
     ap.add_argument("--gt_ext", type=str, default=".png")
     ap.add_argument("--a_ext", type=str, default=".png")
     ap.add_argument("--thr", type=float, default=25.0)
@@ -520,7 +534,10 @@ def main():
         "--filtered_b_root",
         type=str,
         default=None,
-        help="若提供，则为每个 frame 额外输出 filtered B-only PLY 到该根目录下：<prefix>n/point_cloud/iteration_0/point_cloud.ply"
+        help=(
+            "If provided, also write a filtered B-only PLY per frame under this root: "
+            "<filtered_b_root>/<prefix>n/point_cloud/iteration_0/point_cloud.ply"
+        ),
     )
 
     args = ap.parse_args()
@@ -538,11 +555,20 @@ def main():
     if not frames:
         die(f"No model_frame_n found under: {args.b_model_root}")
 
+    total_frames_merged = 0
+    total_mask_sec = 0.0
+    total_merge_sec = 0.0
+    total_frame_sec = 0.0
+
+    t_global_start = time.perf_counter()
+
     for n, model_frame_dir in frames:
         ply_path, itN = find_latest_B_ply(model_frame_dir)
         if not ply_path:
             print(f"[skip] no B ply found in {os.path.relpath(model_frame_dir, args.b_model_root)}")
             continue
+
+        t_frame_start = time.perf_counter()
 
         # Dataset-side paths
         dataset_frame_dir = os.path.join(args.b_dataset_root, f"frame_{n}")
@@ -551,6 +577,7 @@ def main():
             die(f"Missing COLMAP dir for frame {n}: {colmap_dir}")
 
         # masks_residual (use if exists; else auto-make if A images provided)
+        t_mask_start = time.perf_counter()
         masks_dir = os.path.join(dataset_frame_dir, "masks_residual")
         if dir_empty_or_missing(masks_dir):
             masks_dir = ensure_masks_residual(
@@ -561,7 +588,12 @@ def main():
                 thr=args.thr, blur_px=args.blur_px,
                 open_px=args.open_px, close_px=args.close_px, dilate_px=args.dilate_px
             )
+        else:
+            # even when masks already exist, we include the (tiny) check time
+            print(f"[auto-masks] frame {n}: masks_residual already present -> {masks_dir}")
+        t_mask_end = time.perf_counter()
 
+        t_merge_start = time.perf_counter()
         cams = load_colmap_simple(colmap_dir)
 
         print(f"\n[frame {n}] latest iteration = {itN} | ply = {ply_path}")
@@ -573,7 +605,7 @@ def main():
         os.makedirs(out_pc_dir, exist_ok=True)
         out_ply = os.path.join(out_pc_dir, "point_cloud.ply")
 
-        # NEW: filtered-B-only 输出路径
+        # filtered-B-only output path
         filtered_b_ply = None
         if args.filtered_b_root:
             fb_dir = os.path.join(
@@ -592,9 +624,9 @@ def main():
             feature_align=args.feature_align,
             mask_ext=args.mask_ext, mask_dilate_px=args.mask_dilate_px,
             min_views=args.min_views, subsample_cams=args.subsample_cams,
-            filtered_b_ply=filtered_b_ply,   # NEW
+            filtered_b_ply=filtered_b_ply,
         )
-        # [meta] propagate test list & cfg so ta_test can reuse the split
+        # propagate test list & cfg so ta_test can reuse the split
         try:
             import shutil
             for name in ("test_images.txt", "cfg_args"):
@@ -606,7 +638,40 @@ def main():
         except Exception as e:
             print(f"[meta][warn] failed to propagate test meta: {e}")
 
-            
+        t_merge_end = time.perf_counter()
+        t_frame_end = t_merge_end
+
+        mask_sec = t_mask_end - t_mask_start
+        merge_sec = t_merge_end - t_merge_start
+        frame_sec = t_frame_end - t_frame_start
+
+        total_frames_merged += 1
+        total_mask_sec += mask_sec
+        total_merge_sec += merge_sec
+        total_frame_sec += frame_sec
+
+        print(
+            f"[time][frame {n}] masks_residual = {mask_sec:.3f} s | "
+            f"merge+colmap = {merge_sec:.3f} s | frame total = {frame_sec:.3f} s"
+        )
+
+    t_global_end = time.perf_counter()
+    global_sec = t_global_end - t_global_start
+
+    if total_frames_merged > 0:
+        avg_frame_sec = total_frame_sec / total_frames_merged
+    else:
+        avg_frame_sec = 0.0
+
+    print("\n[time][summary]")
+    print(f"  frames merged      : {total_frames_merged}")
+    print(f"  masks_residual sum : {total_mask_sec:.3f} s")
+    print(f"  merge+colmap sum   : {total_merge_sec:.3f} s")
+    print(f"  frame total sum    : {total_frame_sec:.3f} s")
+    print(f"  avg frame time     : {avg_frame_sec:.3f} s")
+    print(f"  end-to-end (loop)  : {global_sec:.3f} s")
+
+
 if __name__ == "__main__":
     try:
         main()
