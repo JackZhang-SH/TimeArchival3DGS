@@ -495,6 +495,49 @@ def merge_one_frame(
         f"(A={A_use['xyz'].shape[0]} + B={B['xyz'].shape[0]})"
     )
 
+def parse_frames_arg(frames_arg: str):
+    """
+    Parse frame selection string.
+
+    Supports:
+      - "all"      : use all frames discovered under b_model_root
+      - "1-5"      : range (inclusive)
+      - "1,3,5"    : explicit list
+      - "3"        : single frame
+      - "1,3,5-8"  : mix of ranges and singles
+
+    Also accepts Chinese commas "，" in place of ",".
+    Returns:
+      []  -> means "all"
+      [1,3,5] etc. for explicit selection
+    """
+    if not frames_arg:
+        return []
+
+    s = frames_arg.strip()
+    s = s.replace("，", ",")  # 允许 1，3，5（中文逗号）
+
+    if s.lower() == "all":
+        return []
+
+    out = []
+    for part in s.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            a, b = part.split("-", 1)
+            a = int(a)
+            b = int(b)
+            if a <= b:
+                out.extend(range(a, b + 1))
+            else:
+                out.extend(range(a, b - 1, -1))
+        else:
+            out.append(int(part))
+
+    # unique + sorted
+    return sorted(dict.fromkeys(out))
 
 # ---------- main ----------
 def main():
@@ -539,7 +582,12 @@ def main():
             "<filtered_b_root>/<prefix>n/point_cloud/iteration_0/point_cloud.ply"
         ),
     )
-
+    ap.add_argument(
+        "--frames",
+        type=str,
+        default="all",
+        help='Frame selection: "all" | "1-5" | "1,3,5" | "3" (Chinese comma "，" also supported).',
+    )
     args = ap.parse_args()
     print("[args]", vars(args))
 
@@ -551,9 +599,31 @@ def main():
     print(f"[stat] A: N={A['xyz'].shape[0]}, f_rest={A['f_rest'].shape[1]} | {args.a_ply}")
 
     # Enumerate frames from MODEL root
-    frames = list_model_frames(args.b_model_root)
-    if not frames:
+
+    all_frames = list_model_frames(args.b_model_root)
+    if not all_frames:
         die(f"No model_frame_n found under: {args.b_model_root}")
+
+    # Apply --frames selection
+    requested = parse_frames_arg(args.frames)
+    if requested:
+        frame_map = {n: path for n, path in all_frames}
+        frames = []
+        missing = []
+        for n in requested:
+            if n in frame_map:
+                frames.append((n, frame_map[n]))
+            else:
+                missing.append(n)
+        if missing:
+            print(f"[warn] requested frames not found under b_model_root: {missing}")
+        if not frames:
+            die(f"No valid frames to merge after applying --frames={args.frames}")
+    else:
+        # "all" → use everything
+        frames = all_frames
+
+    print(f"[frames] will merge frames: {[n for n, _ in frames]}")
 
     total_frames_merged = 0
     total_mask_sec = 0.0
