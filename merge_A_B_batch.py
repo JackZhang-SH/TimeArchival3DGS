@@ -377,6 +377,7 @@ def merge_one_frame(
     min_views=2,
     subsample_cams=0,
     filtered_b_ply=None,
+    write_merged=True,
 ):
     """
     Merge one frame of B with static A.
@@ -484,29 +485,36 @@ def merge_one_frame(
             f"N={B['xyz'].shape[0]}"
         )
 
-    # ---- (5) Concatenate A + B and write merged PLY ----
-    OUT = {
-        k: np.concatenate([A_use[k], B[k]], axis=0)
-        for k in ["xyz", "opacity", "scale", "rot", "f_dc", "f_rest"]
-    }
-    write_ply_xyzcso(out_ply, OUT)
-    print(
-        f"[merge] wrote: {out_ply} | total N={OUT['xyz'].shape[0]} "
-        f"(A={A_use['xyz'].shape[0]} + B={B['xyz'].shape[0]})"
-    )
+    # ---- (5) Concatenate A + B and write merged PLY (optional) ----
+    if write_merged:
+        OUT = {
+            k: np.concatenate([A_use[k], B[k]], axis=0)
+            for k in ["xyz", "opacity", "scale", "rot", "f_dc", "f_rest"]
+        }
+        write_ply_xyzcso(out_ply, OUT)
+        print(
+            f"[merge] wrote: {out_ply} | total N={OUT['xyz'].shape[0]} "
+            f"(A={A_use['xyz'].shape[0]} + B={B['xyz'].shape[0]})"
+        )
+    else:
+        print(
+            f"[merge] skip writing merged PLY (write_merged=False). "
+            f"Filtered B points: N={B['xyz'].shape[0]}"
+        )
+
 
 def parse_frames_arg(frames_arg: str):
     """
     Parse frame selection string.
 
     Supports:
-      - "all"      : use all frames discovered under b_model_root
-      - "1-5"      : range (inclusive)
-      - "1,3,5"    : explicit list
-      - "3"        : single frame
-      - "1,3,5-8"  : mix of ranges and singles
+      - "all"          : use all frames discovered under b_model_root
+      - "1-5"          : range (inclusive)
+      - "1,3,5"        : explicit list
+      - "3"            : single frame
+      - "1,3,5-8"      : mix of ranges and singles (e.g. 1,2,6,20-100)
+      - Also accepts Chinese commas "，" in place of ",".
 
-    Also accepts Chinese commas "，" in place of ",".
     Returns:
       []  -> means "all"
       [1,3,5] etc. for explicit selection
@@ -515,7 +523,7 @@ def parse_frames_arg(frames_arg: str):
         return []
 
     s = frames_arg.strip()
-    s = s.replace("，", ",")  # 允许 1，3，5（中文逗号）
+    s = s.replace("，", ",")  # allow Chinese comma
 
     if s.lower() == "all":
         return []
@@ -574,6 +582,19 @@ def main():
     ap.add_argument("--min_views", type=int, default=25)
     ap.add_argument("--subsample_cams", type=int, default=0)
     ap.add_argument(
+        "--merge_mode",
+        type=str,
+        choices=["merged", "filtered_only", "both"],
+        default="merged",
+        help=(
+            "What to write out:\n"
+            "  'merged'        : write only merged A+B PLY under --out_root (default)\n"
+            "  'filtered_only' : write only filtered B-only PLYs under --filtered_b_root\n"
+            "  'both'          : write both merged A+B and filtered B-only PLYs"
+        ),
+    )
+
+    ap.add_argument(
         "--filtered_b_root",
         type=str,
         default=None,
@@ -586,11 +607,18 @@ def main():
         "--frames",
         type=str,
         default="all",
-        help='Frame selection: "all" | "1-5" | "1,3,5" | "3" (Chinese comma "，" also supported).',
+        help=(
+            'Frame selection: "all" | "1-5" | "1,3,5" | "3" | "1,3,5-8". '
+            'You can mix, e.g. "1,2,6,20-100". Chinese comma "，" is also supported.'
+        ),
     )
     args = ap.parse_args()
     print("[args]", vars(args))
+    if args.merge_mode in ("filtered_only", "both") and not args.filtered_b_root:
+        die("--merge_mode filtered_only/both requires --filtered_b_root")
 
+    write_merged = args.merge_mode in ("merged", "both")
+    write_filtered = args.merge_mode in ("filtered_only", "both")
     if (not args.a_images_root) and (not args.a_images_single):
         print("[warn] no A-only images provided; will assume masks_residual already exist for every frame.")
 
@@ -599,7 +627,6 @@ def main():
     print(f"[stat] A: N={A['xyz'].shape[0]}, f_rest={A['f_rest'].shape[1]} | {args.a_ply}")
 
     # Enumerate frames from MODEL root
-
     all_frames = list_model_frames(args.b_model_root)
     if not all_frames:
         die(f"No model_frame_n found under: {args.b_model_root}")
@@ -670,14 +697,18 @@ def main():
         print(f"[frame {n}] colmap_dir = {colmap_dir}")
         print(f"[frame {n}] masks_dir  = {masks_dir}")
 
-        out_dir = os.path.join(args.out_root, f"{args.prefix}{n}")
-        out_pc_dir = os.path.join(out_dir, "point_cloud_merged")
-        os.makedirs(out_pc_dir, exist_ok=True)
-        out_ply = os.path.join(out_pc_dir, "point_cloud.ply")
+        # merged A+B output
+        out_ply = None
+        out_dir = None
+        if write_merged:
+            out_dir = os.path.join(args.out_root, f"{args.prefix}{n}")
+            out_pc_dir = os.path.join(out_dir, "point_cloud_merged")
+            os.makedirs(out_pc_dir, exist_ok=True)
+            out_ply = os.path.join(out_pc_dir, "point_cloud.ply")
 
-        # filtered-B-only output path
+        # filtered-B-only output
         filtered_b_ply = None
-        if args.filtered_b_root:
+        if write_filtered:
             fb_dir = os.path.join(
                 args.filtered_b_root,
                 f"{args.prefix}{n}",
@@ -695,18 +726,41 @@ def main():
             mask_ext=args.mask_ext, mask_dilate_px=args.mask_dilate_px,
             min_views=args.min_views, subsample_cams=args.subsample_cams,
             filtered_b_ply=filtered_b_ply,
+            write_merged=write_merged,
         )
+
         # propagate test list & cfg so ta_test can reuse the split
         try:
             import shutil
+
+            # model_frame_n root under filtered_b_root
+            filtered_frame_root = None
+            if write_filtered and args.filtered_b_root:
+                filtered_frame_root = os.path.join(
+                    args.filtered_b_root, f"{args.prefix}{n}"
+                )
+                os.makedirs(filtered_frame_root, exist_ok=True)
+
             for name in ("test_images.txt", "cfg_args"):
                 src = os.path.join(model_frame_dir, name)
-                if os.path.isfile(src):
+                if not os.path.isfile(src):
+                    continue
+
+                # 1) Copy to merged A+B output (if it exists)
+                if write_merged and out_dir is not None:
                     dst = os.path.join(out_dir, name)
                     shutil.copy2(src, dst)
                     print(f"[meta] copied {name} → {dst}")
+
+                # 2) Copy to filtered B-only model root
+                if filtered_frame_root is not None:
+                    dst_fb = os.path.join(filtered_frame_root, name)
+                    shutil.copy2(src, dst_fb)
+                    print(f"[meta] copied {name} → {dst_fb}")
+
         except Exception as e:
             print(f"[meta][warn] failed to propagate test meta: {e}")
+
 
         t_merge_end = time.perf_counter()
         t_frame_end = t_merge_end

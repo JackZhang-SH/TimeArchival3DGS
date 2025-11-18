@@ -169,41 +169,109 @@ python make_mask_aabb_only.py `
 
 
 #Normal
-python ta_train.py `
-  -s dataset\soccer_snow_B_60cams `
-  -o ./output_seq/soccer_snow_B_60cams `
-  --frames 1,3,6,10 `
-  -- `
-  --disable_viewer -r 1 `
-  --optimizer_type sparse_adam `
-  --iterations 5200 `
-  --position_lr_max_steps 5200 `
-  --densify_from_iter 300 `
-  --densify_until_iter 3600 `
-  --densification_interval 180 `
-  --densify_grad_threshold 1.6e-4 `
-  --percent_dense 0.014 `
-  --opacity_reset_interval 1100 `
-  --lambda_dssim 0.14 `
-  --sh_degree 3 `
-  --test_images 0003.png 0030.png
-
-#HQ
 python ta_train.py \
   -s dataset/soccer_B_60cams \
-  -o ./output_seq/soccer_B_60cams_H100HQ \
+  -o ./output_seq/soccer_B_60cams_mid \
   --frames 1 \
   -- \
   --disable_viewer -r 1 \
   --optimizer_type sparse_adam \
   --iterations 6400 \
   --position_lr_max_steps 6400 \
-  --densify_from_iter 250 \
-  --densify_until_iter 4200 \
-  --densification_interval 160 \
-  --densify_grad_threshold 1.5e-4 \
-  --percent_dense 0.016 \
-  --opacity_reset_interval 1300 \
+  --densify_from_iter 200 \
+  --densify_until_iter 3200 \
+  --densification_interval 200 \
+  --densify_grad_threshold 1.3e-4 \
+  --percent_dense 0.012 \
+  --opacity_reset_interval 2200 \
   --lambda_dssim 0.14 \
   --sh_degree 3 \
   --test_images 0003.png 0030.png
+
+#HQ
+python ta_train.py \
+  -s dataset/soccer_B_60cams \
+  -o ./output_seq/soccer_B_60cams_H100_HQ \
+  --frames 1,10,40,60,90,120 \
+  -- \
+  --disable_viewer -r 1 \
+  --optimizer_type sparse_adam \
+  --iterations 8400 \
+  --position_lr_max_steps 8400 \
+  --densify_from_iter 200 \
+  --densify_until_iter 3400 \
+  --densification_interval 200 \
+  --densify_grad_threshold 1.3e-4 \
+  --percent_dense 0.012 \
+  --opacity_reset_interval 2200 \
+  --lambda_dssim 0.14 \
+  --sh_degree 3 \
+  --test_images 0003.png 0030.png
+
+
+python ta_train.py \
+  -s dataset/soccer_B_60cams \
+  -o ./output_seq/soccer_B_60cams_geomfreeze \
+  --frames 1 \
+  -- \
+  --disable_viewer -r 1 \
+  --optimizer_type sparse_adam \
+  --iterations 8400 \
+  --position_lr_max_steps 3200 \
+  --densify_from_iter 200 \
+  --densify_until_iter 2600 \
+  --densification_interval 200 \
+  --densify_grad_threshold 1.3e-4 \
+  --percent_dense 0.010 \
+  --opacity_reset_interval 2200 \
+  --lambda_dssim 0.12 \
+  --sh_degree 3 \
+  --test_images 0003.png 0030.png
+
+
+python ./ta_train.py \
+  -s dataset/soccer_B_60cams \
+  -o ./output_seq/soccer_B_60cams_low \
+  --frames 1-120 \
+  -- \
+  --disable_viewer -r 1 \
+  --optimizer_type sparse_adam \
+  --iterations 5200 \
+  --position_lr_max_steps 5200 \
+  --densify_from_iter 300 \
+  --densify_until_iter 3600 \
+  --densification_interval 180 \
+  --densify_grad_threshold 1.6e-4 \
+  --percent_dense 0.014 \
+  --opacity_reset_interval 1100 \
+  --lambda_dssim 0.14 \
+  --sh_degree 3 \
+  --test_images 0003.png 0030.png
+
+
+
+   python ta_render.py `
+       -m output_seq\soccer_B_filtered_60cams `
+       -o ./renders `
+       -c ./camera_track.json `
+       --frames 1-120 `
+       --static_a_ply output_seq\Static_Point_Cloud\70cams_A_point_cloud.ply `
+       --feature_align pad `
+       --preload_depth 2 --warmup --save_format jpeg --jpeg_quality 92
+
+
+
+python ply_visualizer.py `
+  --ply dataset/soccer_A_cloudy_60cams/frame_1/fused_points.ply `
+  --voxel 0.01 --every 1 --point-size 2.0 --bg white --normals `
+  --cam-track camera_track.json --cam-every 1
+
+    python make_side_by_side_video.py `
+        --dir_a results\soccer_cloudy_60cams_following_GT `
+        --dir_b renders `
+        --fps 24 `
+        --out_a results\sideByside\A.mp4 `
+        --out_b results\sideByside\B.mp4 `
+        --out_combined results\sideByside\combined.mp4
+
+   python ta_render.py -m output_seq\soccer_A_70cams -o ./renders -c ./camera_track.json --frames 1 --preload_depth 2 --warmup --save_format jpeg --jpeg_quality 92

@@ -4,13 +4,33 @@
 ta_test.py — Render a model on its test images and compute metrics (PSNR/SSIM/LPIPS),
 with detailed timing breakdown.
 
-Usage example:
-  python ta_test.py -s ./dataset/soccer_dynamic_player_B --models_root ./output_seq \
-      --frames 1-5 --prefix model_frame_ --read_test_from_model_cfg \
+Now supports:
+  - Evaluating either:
+      * A standalone 3DGS model (default, as before), OR
+      * On-the-fly merge of:
+          static A PLY  +  per-frame B-only (filtered) PLY
+    via --static_a_ply and --feature_align.
+
+Usage examples:
+  # 1) Classic mode: merged model_frame_* (no A/B splitting)
+  python ta_test.py \
+      -s ./dataset/soccer_dynamic_player_B \
+      -m ./output_seq/soccer_merged \
+      --frames 1-5 --prefix model_frame_ \
+      --read_test_from_model_cfg --sparse_id 0 --iteration -1
+
+  # 2) New mode: filtered B-only + static A (on-the-fly A+B merge for metrics)
+  python ta_test.py \
+      -s ./dataset/soccer_B_60cams \
+      -m ./output_seq/soccer_B_60cams_FILTERED \
+      --frames 1-5 --prefix model_frame_ \
+      --static_a_ply Static_Point_Cloud/70cams_A_point_cloud.ply \
+      --feature_align pad \
+      --prefer_model_test_list \
       --sparse_id 0 --iteration -1
 """
 
-import argparse, json, math, os, re, sys, time
+import argparse, json, math, os, re, sys, time, tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -37,6 +57,13 @@ try:
     SPARSE_ADAM_AVAILABLE = True
 except Exception:
     SPARSE_ADAM_AVAILABLE = False
+
+# Optional PLY helpers (shared with merge_A_B_batch)
+try:
+    from merge_A_B_batch import read_ply_xyzcso, write_ply_xyzcso
+    HAS_MERGE_HELPERS = True
+except Exception:
+    HAS_MERGE_HELPERS = False
 
 
 # ----------------------------- Helpers (COLMAP I/O) -----------------------------
@@ -222,6 +249,39 @@ def _find_merged_ply(model_dir: Path) -> Optional[Path]:
     return None
 
 
+def _resolve_ply(model_dir: Path, iteration: int) -> Path:
+    """
+    Resolve a model PLY for the "classic" case:
+      - Prefer point_cloud/iteration_X/point_cloud.ply
+      - Fallback to merged PLY locations
+    Used when we are NOT doing on-the-fly A+B merging.
+    """
+    it = iteration if iteration >= 0 else find_latest_iteration(model_dir)
+    if it >= 0:
+        ply = model_dir / "point_cloud" / f"iteration_{it}" / "point_cloud.ply"
+        if ply.exists():
+            return ply
+    m = _find_merged_ply(model_dir)
+    if m is not None:
+        return m
+    raise FileNotFoundError(f"No PLY found under {model_dir} (iteration or merged fallback)")
+
+
+def _resolve_b_ply(model_dir: Path, iteration: int) -> Path:
+    """
+    Resolve B-only PLY in filtered-B mode:
+      - Require point_cloud/iteration_X/point_cloud.ply
+      - Do NOT fall back to any merged PLY.
+    """
+    it = iteration if iteration >= 0 else find_latest_iteration(model_dir)
+    if it < 0:
+        raise FileNotFoundError(f"No iteration_* under {model_dir}/point_cloud")
+    ply = model_dir / "point_cloud" / f"iteration_{it}" / "point_cloud.ply"
+    if not ply.exists():
+        raise FileNotFoundError(f"B-only PLY not found at {ply}")
+    return ply
+
+
 def _choose_test_names(gt_images_dir: Path,
                        prefer_model_test_list: bool,
                        model_dir_for_list: Path,
@@ -302,6 +362,63 @@ def _choose_test_names(gt_images_dir: Path,
     return names
 
 
+# ------------------------- Feature alignment helper -------------------------
+def align_features_for_merge(static_A: dict, B: dict, mode: str):
+    """
+    Align f_rest dimensions between static_A and B according to `mode`.
+
+    Args:
+        static_A : dict with keys including "f_rest"
+        B        : dict with keys including "f_rest"
+        mode     : one of {"none", "pad", "trim"}
+
+    Returns:
+        A_aligned, B_aligned : two new dicts with compatible f_rest shapes
+    """
+    if mode is None:
+        mode = "none"
+
+    if mode not in ("none", "pad", "trim"):
+        raise ValueError(f"Unsupported feature_align mode: {mode}")
+
+    A = {k: v for k, v in static_A.items()}
+    B = {k: v for k, v in B.items()}
+
+    if "f_rest" not in A or "f_rest" not in B:
+        # Nothing to align; assume other fields are already consistent.
+        return A, B
+
+    fa = A["f_rest"].shape[1]
+    fb = B["f_rest"].shape[1]
+
+    if fa == fb or mode == "none":
+        return A, B
+
+    if mode == "pad":
+        if fa > fb:
+            # Pad B up to A's feature dimension
+            pad = np.zeros(
+                (B["f_rest"].shape[0], fa - fb),
+                dtype=B["f_rest"].dtype,
+            )
+            B["f_rest"] = np.concatenate([B["f_rest"], pad], axis=1)
+        else:
+            # Pad A up to B's feature dimension
+            pad = np.zeros(
+                (A["f_rest"].shape[0], fb - fa),
+                dtype=A["f_rest"].dtype,
+            )
+            A["f_rest"] = np.concatenate([A["f_rest"], pad], axis=1)
+
+    elif mode == "trim":
+        # Trim both to the smaller dimension
+        d = min(fa, fb)
+        A["f_rest"] = A["f_rest"][:, :d]
+        B["f_rest"] = B["f_rest"][:, :d]
+
+    return A, B
+
+
 # ------------------------- Visualization helpers -------------------------
 def _tensor_to_pil_chw01(t: torch.Tensor) -> Image.Image:
     """
@@ -323,18 +440,6 @@ def _save_side_by_side(pil_left: Image.Image, pil_right: Image.Image, out_path: 
 
 
 # --------------------------------- Core testing --------------------------------
-def _resolve_ply(model_dir: Path, iteration: int) -> Path:
-    it = iteration if iteration >= 0 else find_latest_iteration(model_dir)
-    if it >= 0:
-        ply = model_dir / "point_cloud" / f"iteration_{it}" / "point_cloud.ply"
-        if ply.exists():
-            return ply
-    m = _find_merged_ply(model_dir)
-    if m is not None:
-        return m
-    raise FileNotFoundError(f"No PLY found under {model_dir} (iteration or merged fallback)")
-
-
 def test_one_frame(frame_idx: int,
                    gt_frame_dir: Path,
                    model_dir: Path,
@@ -346,9 +451,17 @@ def test_one_frame(frame_idx: int,
                    lpips_net: str = "vgg",
                    znear: float = 0.01, zfar: float = 100.0,
                    limit: Optional[int] = None,
-                   vis_dir: Optional[Path] = None) -> Dict[str, float]:
+                   vis_dir: Optional[Path] = None,
+                   static_A: Optional[dict] = None,
+                   feature_align: str = "none") -> Dict[str, float]:
     """
     Run evaluation on a single frame and return metrics + timing info.
+
+    Two modes:
+      - If static_A is None   : load a single 3DGS model from model_dir (classic)
+      - If static_A is not None:
+            treat model_dir as holding B-only PLY; on-the-fly merge static_A+B
+            into a temporary PLY, load that merged model, and evaluate.
 
     Timing breakdown (per frame):
       - model_load_time: PLY resolve + GaussianModel + load_ply
@@ -358,13 +471,57 @@ def test_one_frame(frame_idx: int,
     """
     # ------------------------ Model loading timing ------------------------
     t_model0 = time.perf_counter()
-    ply = _resolve_ply(model_dir, iteration)
 
-    gauss = GaussianModel(sh_degree)
-    gauss.load_ply(str(ply), use_train_test_exp=False)
+    if static_A is None:
+        # Classic mode: use iteration / merged PLY resolution
+        ply = _resolve_ply(model_dir, iteration)
+        gauss = GaussianModel(sh_degree)
+        gauss.load_ply(str(ply), use_train_test_exp=False)
+        print(f"[frame {frame_idx}] Model loaded from {ply}")
+    else:
+        # Filtered B-only + static A : on-the-fly A+B merge
+        if not HAS_MERGE_HELPERS:
+            raise RuntimeError(
+                "static_A was provided, but merge_A_B_batch helpers "
+                "(read_ply_xyzcso/write_ply_xyzcso) are not available."
+            )
+
+        ply_b = _resolve_b_ply(model_dir, iteration)
+        print(f"[frame {frame_idx}] B-only model loaded from {ply_b}")
+        B = read_ply_xyzcso(str(ply_b))
+        A_local = {k: v for k, v in static_A.items()}
+
+        if feature_align is not None and feature_align != "none":
+            A_local, B = align_features_for_merge(A_local, B, feature_align)
+
+        OUT = {
+            k: np.concatenate([A_local[k], B[k]], axis=0)
+            for k in ["xyz", "opacity", "scale", "rot", "f_dc", "f_rest"]
+        }
+
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=f"ta_test_merge_{frame_idx:05d}_", suffix=".ply"
+        )
+        os.close(fd)
+        write_ply_xyzcso(tmp_path, OUT)
+
+        gauss = GaussianModel(sh_degree)
+        gauss.load_ply(tmp_path, use_train_test_exp=False)
+
+        # Remove temporary PLY
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+
+        print(
+            f"[frame {frame_idx}] On-the-fly merged A+B "
+            f"(A={A_local['xyz'].shape[0]}, B={B['xyz'].shape[0]}, "
+            f"total={OUT['xyz'].shape[0]})"
+        )
+
     t_model1 = time.perf_counter()
     model_load_time = t_model1 - t_model0
-    print(f"[frame {frame_idx}] Model loaded from {ply}")
     print(f"[frame {frame_idx}] Model load time: {model_load_time:.4f} s")
 
     bg_color = [1, 1, 1] if white_background else [0, 0, 0]
@@ -519,6 +676,31 @@ def main(argv=None):
     parser.add_argument("--read_test_from_model_cfg", action="store_true",
                         help="Try to read test split from each model's cfg_args")
 
+    # A+B merge controls (new)
+    parser.add_argument(
+        "--static_a_ply",
+        type=str,
+        default=None,
+        help=(
+            "Optional static A point cloud PLY. If provided, ta_test will "
+            "assume models_root contains per-frame B-only (filtered) models, "
+            "and will on-the-fly merge static A + B for evaluation."
+        ),
+    )
+    parser.add_argument(
+        "--feature_align",
+        type=str,
+        choices=["none", "pad", "trim"],
+        default="none",
+        help=(
+            "Feature alignment mode when merging static A and per-frame B-only "
+            "point clouds:\n"
+            "  none : assume f_rest dimensions already match\n"
+            "  pad  : pad the smaller f_rest to match the larger one\n"
+            "  trim : trim both to the smaller f_rest dimension"
+        ),
+    )
+
     # Output
     parser.add_argument("--save_json", type=str, default=None,
                         help="Write full results to this JSON path")
@@ -549,6 +731,21 @@ def main(argv=None):
     vis_root = Path(args.vis_root).resolve() if (args.save_vis and args.vis_root) else (
         (models_root / "_test_vis") if args.save_vis else None
     )
+
+    # Optional static A (for filtered-B + A configuration)
+    static_A_data = None
+    if args.static_a_ply is not None:
+        if not HAS_MERGE_HELPERS:
+            raise RuntimeError(
+                "--static_a_ply was provided, but merge_A_B_batch helpers "
+                "(read_ply_xyzcso/write_ply_xyzcso) could not be imported."
+            )
+        static_A_data = read_ply_xyzcso(args.static_a_ply)
+        print(
+            f"[ta_test] Loaded static A PLY: {args.static_a_ply} | "
+            f"N={static_A_data['xyz'].shape[0]}, "
+            f"f_rest={static_A_data['f_rest'].shape[1]}"
+        )
 
     t0 = time.perf_counter()
     all_results: Dict[int, Dict[str, float]] = {}
@@ -598,7 +795,8 @@ def main(argv=None):
             res = test_one_frame(
                 i, gt_frame_dir, model_dir, args.iteration, args.sparse_id,
                 pipe, args.sh_degree, args.white_background, names,
-                lpips_net=args.lpips_net, limit=args.limit, vis_dir=vis_dir
+                lpips_net=args.lpips_net, limit=args.limit, vis_dir=vis_dir,
+                static_A=static_A_data, feature_align=args.feature_align
             )
         except Exception as e:
             print(f"[frame {i}][ERROR] {e}")
