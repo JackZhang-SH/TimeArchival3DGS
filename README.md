@@ -1,8 +1,9 @@
 # Time Archival 3DGS (TA-3DGS)
 
-TA-3DGS is a **3D Gaussian Splatting (3DGS)** variant of **TACV (Time-Archival Camera Virtualization)**: a dynamic sports scene is represented as a **time-indexed set of multi-view snapshots**, and we train / render / evaluate **per time step (per frame folder)**.
+TA-3DGS is a **3D Gaussian Splatting (3DGS)** variant of  **[TACV (Time-Archival Camera Virtualization)](https://github.com/JackZhang-SH/Time-Archival-Camera-Virtualization-for-Visual-Performance-and-Sports.git)**: a dynamic sports scene is represented as a **time-indexed set of multi-view snapshots**, and we train / render / evaluate **per time step (per frame folder)**.
 
-This repository is intended to pair nicely with **RS Studio** exports (COLMAP + 3DGS Surface Points), i.e., **COLMAP-style frames + `fused_points.ply`** for convenient initialization and training.
+This repository is intended to pair nicely with **[RS Studio](https://github.com/JackZhang-SH/RealSynth_Studio.git)** exports (COLMAP + 3DGS Surface Points), i.e., **COLMAP-style frames + `fused_points.ply`** for convenient initialization and training.
+
 
 ![GT (left) vs Render (right)](assets/demo.gif)
 
