@@ -31,6 +31,7 @@ import time
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import List, Tuple
+from ta_common import parse_frames
 
 
 # --------------------------- utils ---------------------------
@@ -66,45 +67,6 @@ def _get_flag_value(flags: List[str], name: str) -> str | None:
     if idx + 1 >= len(flags):
         return None
     return flags[idx + 1]
-
-
-def parse_frames(frames_expr: str, dataset_root: Path) -> List[int]:
-    """
-    Accepts:
-      - "all" (scan dataset_root/frame_*)
-      - "even" or "odd" (based on discovered frame_* dirs)
-      - "N-M"
-      - "N,M,K"
-      - "N"
-      - "frame_N"
-    """
-    def scan_all() -> List[int]:
-        found = []
-        for p in sorted(dataset_root.glob("frame_*")):
-            if p.is_dir():
-                try:
-                    found.append(int(p.name.split("_")[1]))
-                except Exception:
-                    pass
-        return found
-
-    s = frames_expr.strip().lower()
-    if s == "all":
-        return scan_all()
-    if s == "even" or s == "odd":
-        all_frames = scan_all()
-        if s == "even":
-            return [i for i in all_frames if i % 2 == 0]
-        else:
-            return [i for i in all_frames if i % 2 == 1]
-    if s.startswith("frame_"):
-        return [int(s.split("_")[1])]
-    if "-" in s:
-        a, b = s.split("-")
-        return list(range(int(a), int(b) + 1))
-    if "," in s:
-        return [int(x) for x in s.split(",")]
-    return [int(s)]
 
 
 @dataclass
@@ -146,7 +108,6 @@ def main(argv: List[str]) -> None:
         help="Use previous frame's checkpoint as --start_checkpoint for the next frame (sequential warm-start).",
     )
     # sentinel to split args
-    wrapper.add_argument("--", dest="dashdash", action="store_true", help=argparse.SUPPRESS)
 
     # Split wrapper vs train flags
     if "--" in argv:

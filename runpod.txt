@@ -1,6 +1,6 @@
 cd /workspace
 apt-get update -y
-apt-get install -y wget bzip2 git build-essential
+apt-get install -y wget bzip2 git build-essential zip unzip
 git clone https://github.com/JackZhang-SH/TimeArchival3DGS.git
 
 
@@ -36,16 +36,16 @@ pip install --no-build-isolation --no-cache-dir ./submodules/simple-knn
 pip install --no-build-isolation --no-cache-dir ./submodules/fused-ssim
 
 gdown --folder --id 1tyQwIbsc0tbc3mU5CkFfj8k5h1LIsaK3 -O ./dataset/ --remaining-ok --continue
-gdown --id 1gTlS0HVvCP5_WLgm_u41cXiZc_walwo1 -O ./dataset/ --remaining-ok --continue
+gdown --id 1vybx5idXuqCfQt9Q06zSPXrQxAYpmS2v -O ./dataset/ --remaining-ok --continue
 
-
+https://drive.google.com/file/d/1vybx5idXuqCfQt9Q06zSPXrQxAYpmS2v/view?usp=drive_link
 apt-get update
 apt-get install -y rclone
 rclone config    #all default
-rclone copy "gdrive:TA-3DGS/soccer_B_cloudy_60cams.zip" ./dataset -P
+rclone copy "gdrive:TA-3DGS/soccer_B_sunny_60cams.zip" ./dataset -P
 rclone copy "gdrive:TA-3DGS/soccer_A_cloudy_60cams.zip" ./dataset -P
 
-https://drive.google.com/file/d/1gTlS0HVvCP5_WLgm_u41cXiZc_walwo1/view?usp=drive_link
+https://drive.google.com/file/d/1NVsJCrLaOWQULgeZ-BHX1Lv6T5gAjdbP/view?usp=drive_link
 
 scp -r -C -P 47261 root@62.169.159.96:/workspace/TimeArchival3DGS/output_seq/soccer_merged_60cams/_test_vis ./results
 

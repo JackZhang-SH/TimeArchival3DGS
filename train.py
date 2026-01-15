@@ -16,7 +16,6 @@ from random import randint
 from pathlib import Path
 from argparse import ArgumentParser, Namespace
 
-import numpy as np
 import torch
 from tqdm import tqdm
 
@@ -47,74 +46,7 @@ except Exception:
     SPARSE_ADAM_AVAILABLE = False
 
 
-def _load_mask_and_roi(source_path: str, image_name: str, H: int, W: int, pad_px: int = 2):
-    """
-    Load a binary 0/1 mask from work_dataset/masks_raw/<stem>.npy.
-    Returns (mask_hw: torch.float32 CUDA [H,W], (y0,y1,x0,x1) or None).
-    If the file is missing or empty, returns (None, None).
-    """
-    npy_path = Path(source_path) / "masks_raw" / (Path(image_name).stem + ".npy")
-    if not npy_path.exists():
-        return None, None
-    try:
-        mask_np = np.load(str(npy_path))
-        if mask_np.dtype not in (np.uint8, np.bool_):
-            mask_np = (mask_np > 0).astype(np.uint8)
-        ys, xs = np.nonzero(mask_np)
-        if ys.size == 0:
-            return None, None
-        y0, y1 = int(ys.min()), int(ys.max()) + 1
-        x0, x1 = int(xs.min()), int(xs.max()) + 1
-        if pad_px > 0:
-            y0 = max(0, y0 - pad_px)
-            x0 = max(0, x0 - pad_px)
-            y1 = min(H, y1 + pad_px)
-            x1 = min(W, x1 + pad_px)
-        mask_t = torch.from_numpy((mask_np > 0).astype(np.float32))  # HxW, 0/1 float
-        mask_t = mask_t.to("cuda", non_blocking=True)
-        return mask_t, (y0, y1, x0, x1)
-    except Exception:
-        return None, None
-
-
-def _masked_l1_and_ssim(image, gt_image, mask_hw, roi, lambda_dssim, fused_ssim_available):
-    """
-    Compute masked L1 inside ROI; for SSIM, replace prediction with GT outside mask
-    so outside pixels don't contribute to the difference.
-
-    Returns (Ll1, ssim_value) as scalar tensors.
-    """
-    if roi is not None:
-        y0, y1, x0, x1 = roi
-        img_roi = image[:, y0:y1, x0:x1]
-        gt_roi = gt_image[:, y0:y1, x0:x1]
-        m_roi = mask_hw[y0:y1, x0:x1]
-    else:
-        img_roi = image
-        gt_roi = gt_image
-        m_roi = mask_hw
-
-    # L1 over mask only
-    m3 = m_roi.unsqueeze(0)  # 1xHxW
-    diff = (img_roi - gt_roi).abs() * m3
-    denom = (m_roi.sum() * img_roi.shape[0]).clamp_min(1.0)
-    Ll1 = diff.sum() / denom
-
-    # SSIM with prediction replaced by GT outside mask
-    img4ssim = img_roi * m3 + gt_roi * (1.0 - m3)
-    if lambda_dssim == 0:
-        ssim_value = torch.tensor(0.0, device=image.device)
-    else:
-        if fused_ssim_available:
-            ssim_value = fused_ssim(img4ssim.unsqueeze(0), gt_roi.unsqueeze(0))
-        else:
-            ssim_value = ssim(img4ssim, gt_roi)
-    return Ll1, ssim_value
-
-
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, reset_checkpoint_iter: bool = False,):
-    # Cache for (mask_hw, roi) per image_name to avoid per-iter np.load/roi compute
-    mask_cache = {}
 
     if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
         sys.exit(
@@ -301,30 +233,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         # Loss
         tL0.record()
         gt_image = viewpoint_cam.original_image.cuda()
-        if getattr(opt, "masked", False):
-            H, W = int(viewpoint_cam.image_height), int(viewpoint_cam.image_width)
-            key = viewpoint_cam.image_name
-            if key not in mask_cache:
-                mask_cache[key] = _load_mask_and_roi(dataset.source_path, key, H, W, pad_px=2)
-            mask_hw, roi = mask_cache[key]
-
-            if mask_hw is not None:
-                Ll1, ssim_value = _masked_l1_and_ssim(
-                    image, gt_image, mask_hw, roi, opt.lambda_dssim, FUSED_SSIM_AVAILABLE
-                )
-            else:
-                # Fallback to full-frame if mask missing
-                Ll1 = l1_loss(image, gt_image)
-                if FUSED_SSIM_AVAILABLE:
-                    ssim_value = fused_ssim(image.unsqueeze(0), gt_image.unsqueeze(0))
-                else:
-                    ssim_value = ssim(image, gt_image)
+        Ll1 = l1_loss(image, gt_image)
+        if FUSED_SSIM_AVAILABLE:
+            ssim_value = fused_ssim(image.unsqueeze(0), gt_image.unsqueeze(0))
         else:
-            Ll1 = l1_loss(image, gt_image)
-            if FUSED_SSIM_AVAILABLE:
-                ssim_value = fused_ssim(image.unsqueeze(0), gt_image.unsqueeze(0))
-            else:
-                ssim_value = ssim(image, gt_image)
+            ssim_value = ssim(image, gt_image)
 
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
         tL1.record()
@@ -538,13 +451,12 @@ if __name__ == "__main__":
     parser.add_argument("--disable_viewer", action="store_true", default=False)
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default=None)
-    parser.add_argument("--masked", action="store_true", help="Use mask-aware ROI cropping and masked loss if masks_raw/<stem>.npy exists")
     parser.add_argument(
         "--reset_start_iter",
         action="store_true",
         help="When resuming from --start_checkpoint, ignore stored iteration and restart schedule from 0.",
     )
-    # ---- TA: CLI for test split override (passed through from ta_train_masked.py after '--') ----
+    # ---- TA: CLI for test split override (passed through from ta_train.py after '--') ----
     parser.add_argument(
         "--test_images",
         nargs="+",

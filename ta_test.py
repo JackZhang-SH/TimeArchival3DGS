@@ -51,6 +51,7 @@ from scene.colmap_loader import (read_extrinsics_binary, read_extrinsics_text,
 from utils.image_utils import psnr  # noqa: F401
 from utils.loss_utils import ssim  # noqa: F401
 from lpipsPyTorch import lpips  # noqa: F401
+from ta_common import parse_frames, find_latest_iteration, load_cam_from_colmap, align_features_for_merge
 
 try:
     from diff_gaussian_rasterization import SparseGaussianAdam  # noqa: F401
@@ -67,122 +68,7 @@ except Exception:
 
 
 # ----------------------------- Helpers (COLMAP I/O) -----------------------------
-def _try_read_colmap_extrinsics(path_bin: Path, path_txt: Path):
-    try:
-        return read_extrinsics_binary(str(path_bin)), True
-    except Exception:
-        return read_extrinsics_text(str(path_txt)), False
-
-
-def _try_read_colmap_intrinsics(path_bin: Path, path_txt: Path):
-    try:
-        return read_intrinsics_binary(str(path_bin)), True
-    except Exception:
-        return read_intrinsics_text(str(path_txt)), False
-
-
-def load_cam_from_colmap(dataset_root: Path, image_name: str, sparse_id: int = 0,
-                         znear: float = 0.01, zfar: float = 100.0) -> MiniCam:
-    sp = dataset_root / "sparse" / str(sparse_id)
-    if not sp.exists():
-        raise FileNotFoundError(f"COLMAP sparse folder not found: {sp}")
-
-    images_bin = sp / "images.bin"
-    images_txt = sp / "images.txt"
-    cameras_bin = sp / "cameras.bin"
-    cameras_txt = sp / "cameras.txt"
-
-    extr_map, _ = _try_read_colmap_extrinsics(images_bin, images_txt)
-    intr_map, _ = _try_read_colmap_intrinsics(cameras_bin, cameras_txt)
-
-    # Match by full path or basename
-    target_key = None
-    for k, extr in extr_map.items():
-        if extr.name == image_name:
-            target_key = k
-            break
-    if target_key is None:
-        bn = os.path.basename(image_name)
-        for k, extr in extr_map.items():
-            if os.path.basename(extr.name) == bn:
-                target_key = k
-                break
-    if target_key is None:
-        raise KeyError(f"Image named '{image_name}' not found in COLMAP images.")
-
-    extr = extr_map[target_key]
-    intr = intr_map[extr.camera_id]
-
-    width, height = int(intr.width), int(intr.height)
-    model = intr.model
-    if model == "SIMPLE_PINHOLE":
-        fx = float(intr.params[0]); fy = fx
-    elif model == "PINHOLE":
-        fx = float(intr.params[0]); fy = float(intr.params[1])
-    else:
-        raise AssertionError(f"Unsupported COLMAP camera model: {model}. Use PINHOLE/SIMPLE_PINHOLE.")
-
-    # Convert to FoV
-    def focal2fov(f, w): return 2.0 * math.atan(w / (2.0 * f))
-    fovx = focal2fov(fx, width); fovy = focal2fov(fy, height)
-
-    R = np.transpose(qvec2rotmat(extr.qvec)).astype(np.float32)
-    T = np.asarray(extr.tvec, dtype=np.float32)
-
-    # Assemble MiniCam
-    from utils.graphics_utils import getWorld2View2, getProjectionMatrix  # lazy import
-    world_view = torch.tensor(
-        getWorld2View2(R, T, np.array([0, 0, 0], dtype=np.float32), 1.0)
-    ).transpose(0, 1).cuda()
-    proj = getProjectionMatrix(
-        znear=znear, zfar=zfar, fovX=fovx, fovY=fovy
-    ).transpose(0, 1).cuda()
-    full = (world_view.unsqueeze(0).bmm(proj.unsqueeze(0))).squeeze(0)
-    view = MiniCam(width, height, fovy, fovx, znear, zfar, world_view, full)
-    setattr(view, "image_name", extr.name)
-    return view
-
-
 # ----------------------------- FS / parsing helpers -----------------------------
-def parse_frames(frames_arg: str, models_root: Path, prefix: str) -> List[int]:
-    if frames_arg == "all":
-        frames: List[int] = []
-        for d in sorted(models_root.glob(f"{prefix}*")):
-            if not d.is_dir():
-                continue
-            try:
-                frames.append(int(d.name.split("_")[-1]))
-            except Exception:
-                pass
-        return frames
-    out: List[int] = []
-    for part in frames_arg.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        if "-" in part:
-            a, b = part.split("-", 1)
-            out.extend(list(range(int(a), int(b) + 1)))
-        else:
-            out.append(int(part))
-    # dedup & sort
-    return sorted(list(dict.fromkeys(out)))
-
-
-def find_latest_iteration(model_path: Path) -> int:
-    p = model_path / "point_cloud"
-    if not p.exists():
-        return -1
-    iters = []
-    for d in p.iterdir():
-        if d.is_dir() and d.name.startswith("iteration_"):
-            try:
-                iters.append(int(d.name.split("_")[1]))
-            except Exception:
-                pass
-    return max(iters) if iters else -1
-
-
 def _read_model_cfg_tests(model_dir: Path) -> Tuple[Optional[List[str]], Optional[str], bool]:
     """Parse train.py's cfg_args for test split hints. Returns (names, regex, clear_default)."""
     cfg = model_dir / "cfg_args"
@@ -363,62 +249,6 @@ def _choose_test_names(gt_images_dir: Path,
 
 
 # ------------------------- Feature alignment helper -------------------------
-def align_features_for_merge(static_A: dict, B: dict, mode: str):
-    """
-    Align f_rest dimensions between static_A and B according to `mode`.
-
-    Args:
-        static_A : dict with keys including "f_rest"
-        B        : dict with keys including "f_rest"
-        mode     : one of {"none", "pad", "trim"}
-
-    Returns:
-        A_aligned, B_aligned : two new dicts with compatible f_rest shapes
-    """
-    if mode is None:
-        mode = "none"
-
-    if mode not in ("none", "pad", "trim"):
-        raise ValueError(f"Unsupported feature_align mode: {mode}")
-
-    A = {k: v for k, v in static_A.items()}
-    B = {k: v for k, v in B.items()}
-
-    if "f_rest" not in A or "f_rest" not in B:
-        # Nothing to align; assume other fields are already consistent.
-        return A, B
-
-    fa = A["f_rest"].shape[1]
-    fb = B["f_rest"].shape[1]
-
-    if fa == fb or mode == "none":
-        return A, B
-
-    if mode == "pad":
-        if fa > fb:
-            # Pad B up to A's feature dimension
-            pad = np.zeros(
-                (B["f_rest"].shape[0], fa - fb),
-                dtype=B["f_rest"].dtype,
-            )
-            B["f_rest"] = np.concatenate([B["f_rest"], pad], axis=1)
-        else:
-            # Pad A up to B's feature dimension
-            pad = np.zeros(
-                (A["f_rest"].shape[0], fb - fa),
-                dtype=A["f_rest"].dtype,
-            )
-            A["f_rest"] = np.concatenate([A["f_rest"], pad], axis=1)
-
-    elif mode == "trim":
-        # Trim both to the smaller dimension
-        d = min(fa, fb)
-        A["f_rest"] = A["f_rest"][:, :d]
-        B["f_rest"] = B["f_rest"][:, :d]
-
-    return A, B
-
-
 # ------------------------- Visualization helpers -------------------------
 def _tensor_to_pil_chw01(t: torch.Tensor) -> Image.Image:
     """
