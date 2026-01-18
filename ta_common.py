@@ -171,6 +171,25 @@ def load_cam_from_colmap(
     intr = intr_map[extr.camera_id]
 
     width, height = int(intr.width), int(intr.height)
+    # --- robust override by real image size (avoid bogus COLMAP W/H) ---
+    try:
+        from PIL import Image
+        img_path = dataset_root / "images" / image_name
+        if not img_path.exists():
+            import os as _os
+            img_path = dataset_root / "images" / _os.path.basename(image_name)
+        if img_path.exists():
+            W_img, H_img = Image.open(str(img_path)).size
+            if (W_img != width) or (H_img != height):
+                sx = W_img / max(1, width)
+                sy = H_img / max(1, height)
+                fx *= sx
+                fy *= sy
+                width, height = int(W_img), int(H_img)
+    except Exception:
+        pass
+    # --- end override ---
+
     model = intr.model
     if model == "SIMPLE_PINHOLE":
         fx = float(intr.params[0]); fy = fx
@@ -199,20 +218,24 @@ def load_cam_from_colmap(
     full_proj = (world_view.unsqueeze(0).bmm(proj.unsqueeze(0))).squeeze(0)
 
     cam_center = world_view.inverse()[3, :3]
-    return MiniCam(
+    # ensure cuda tensors for renderer extension
+    world_view = world_view.to(device="cuda", dtype=torch.float32).contiguous()
+    full_proj  = full_proj.to(device="cuda", dtype=torch.float32).contiguous()
+
+    cam = MiniCam(
         width=width,
         height=height,
-        fovx=float(fovx),
         fovy=float(fovy),
+        fovx=float(fovx),
         znear=float(znear),
         zfar=float(zfar),
         world_view_transform=world_view,
         full_proj_transform=full_proj,
-        camera_center=cam_center,
-        image_name=image_name,
     )
-
-
+    # MiniCam already computes camera_center internally from world_view_transform.
+    # Keep image_name for debugging/printing if needed.
+    cam.image_name = image_name
+    return cam
 def align_features_for_merge(A_feats, B_feats, align: str = "none"):
     """
     Align B's feature distribution to A (used for merge A+B in ta_render/ta_test).

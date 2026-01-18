@@ -15,9 +15,9 @@ This repository is intended to pair nicely with **[RS Studio](https://github.com
 
 ## Per-frame training + evaluation (stable)
 
-### What “stable” means here
+### What "stable" means here
 The stable path focuses on a robust baseline workflow:
-- **Train one 3DGS per frame folder** (`frame_1`, `frame_2`, …)
+- **Train one 3DGS per frame folder** (`frame_1`, `frame_2`, ...)
 - **Render / evaluate per frame**
 - **(Optional) Pack models** for faster loading
 - **(Optional) Run the TA server GUI** to browse frames
@@ -70,7 +70,6 @@ pip install --no-build-isolation --no-cache-dir ./submodules/fused-ssim
 
 ## Dataset layout (TACV / time-indexed)
 
-
 ### Prepared example dataset (Google Drive)
 
 Several prepared TA-3DGS datasets are available here:
@@ -80,8 +79,8 @@ Several prepared TA-3DGS datasets are available here:
 Download the folder and place the dataset under `./dataset/` (keep the original subfolder names, e.g., `frame_1/`, `frame_2/`, ...).
 
 **Folder naming convention (A vs B):**
-- Folders with **`A`** in the name contain **static stadium/environment only (no players)** — intended for training a **high-quality static background 3DGS**.
-- Folders with **`B`** in the name contain **stadium + players (dynamic scene)** — intended for **per-frame (time-indexed) training** where moving actors are present.
+- Folders with **`A`** in the name contain **static stadium/environment only (no players)** - intended for training a **high-quality static background 3DGS**.
+- Folders with **`B`** in the name contain **stadium + players (dynamic scene)** - intended for **per-frame (time-indexed) training** where moving actors are present.
 
 A typical TA-3DGS dataset root looks like:
 
@@ -103,7 +102,6 @@ For a **single static scene** (no time indexing), you can also use the standard 
 
 ---
 
-
 ## Train (stable)
 
 ### A) Train a single scene (non-time-indexed)
@@ -114,13 +112,106 @@ python train.py --source_path ./dataset/my_scene --model_path ./output/my_scene 
 ### B) Train all frames (time-indexed)
 ```bash
 python ta_train.py -s ./dataset/soccer_B_70cams -o ./output_seq/soccer_B_70cams --frames all --resume-if-exists -- \
-  --disable_viewer -r 2 --iterations 8000
+  --disable_viewer -r 1 --iterations 8000
 ```
 
 Notes:
 - `-s` points to the dataset root containing `frame_*`.
 - `-o` is the output root; each frame will produce a model folder.
 - The arguments after `--` are forwarded to the underlying trainer (iterations, resolution, etc.).
+
+### C) Train all frames with warm start (recommended)
+This uses `ta_train.py --warm_chain` to initialize each frame from the **previous frame’s checkpoint**.
+
+```bash
+python ta_train.py -s ./dataset/soccer_B_70cams -o ./output_seq/soccer_B_70cams --frames all --resume-if-exists --warm_chain -- \
+  --disable_viewer -r 1 --iterations 8000 --densify_until_iter 0 --densification_interval 0
+```
+
+
+---
+
+## Warm start (recommended)
+
+TA-3DGS supports **warm-start training** for time-indexed sequences: initialize a frame's 3DGS from a previous solution (most commonly the **previous frame**). This typically improves convergence speed and stability, and in many sequences it makes **per-frame GT point clouds optional**.
+
+### Do I need per-frame `fused_points.ply` (GT init)?
+Many prepared TA-3DGS datasets include a per-frame `fused_points.ply` ("GT init"). However, in practice it is often **not strictly necessary**:
+
+- If cameras are consistent and motion between adjacent frames is moderate, **Warm + NoDensify** is usually **close to GT init**.
+- GT init tends to be only **slightly better** than Warm + NoDensify in many sequences, suggesting per-frame GT may be optional **except in harder motion regimes** (fast motion, heavy occlusion, large view changes, etc.).
+
+### Quality vs cost: three practical modes
+
+- **Warm + Densify**: Best quality, but cost grows rapidly over time (training slows, model size explodes).
+- **Warm + NoDensify**: Stable and compact, quality close to GT but generally not better.
+- **GT Init**: Stable baseline; quality steady and only slightly above Warm + NoDensify, suggesting per-frame GT may be optional except in harder motion regimes.
+
+### How to disable densification
+Warm start plus densification can become increasingly expensive on long sequences because the number of Gaussians keeps growing. For long sequences, **disable densification**.
+
+To turn densification off, pass the following to the underlying trainer (arguments after `--`):
+
+- `--densify_until_iter 0` (recommended)
+
+Optionally, you can also set:
+
+- `--densification_interval 0`
+
+Example (time-indexed):
+```bash
+python ta_train.py -s ./dataset/soccer_B_70cams -o ./output_seq/soccer_B_70cams --frames all --resume-if-exists -- \
+  --disable_viewer -r 1 --iterations 8000 --densify_until_iter 0 --densification_interval 0
+```
+
+Example (single scene):
+```bash
+python train.py --source_path ./dataset/my_scene --model_path ./output/my_scene --disable_viewer \
+  --densify_until_iter 0 --densification_interval 0
+```
+
+### Enabling warm start (correct `ta_train.py` command)
+
+Warm start for time-indexed training is enabled by **`ta_train.py --warm_chain`**.
+
+What it does:
+- Trains frames **sequentially** (in increasing frame index).
+- Forces a checkpoint at the **final iteration** by automatically appending `--checkpoint_iterations <N>`.
+- Uses the previous frame’s checkpoint (`chkpnt<N>.pth`) as `--start_checkpoint` for the next frame **and** passes `--reset_start_iter` so the checkpoint is treated as initialization (iteration restarts from 0).
+
+**Important:** `--warm_chain` requires that you pass `--iterations N` *after* the `--` (i.e., in the forwarded `train.py` args).
+
+#### Example: Warm + NoDensify (recommended for long sequences)
+```bash
+python ta_train.py \
+  -s ./dataset/soccer_B_70cams \
+  -o ./output_seq/soccer_B_70cams \
+  --frames all \
+  --resume-if-exists \
+  --warm_chain \
+  -- \
+  --disable_viewer -r 1 \
+  --iterations 8000 \
+  --densify_until_iter 0 --densification_interval 0
+```
+
+#### Example: Warm + Densify (best quality, but slows down over time)
+```bash
+python ta_train.py \
+  -s ./dataset/soccer_B_70cams \
+  -o ./output_seq/soccer_B_70cams \
+  --frames all \
+  --resume-if-exists \
+  --warm_chain \
+  -- \
+  --disable_viewer -r 2 \
+  --iterations 8000 \
+  --densify_from_iter 1500 --densify_until_iter 5000 \
+  --densification_interval 200 --densify_grad_threshold 5e-4 \
+  --percent_dense 0.005 --opacity_reset_interval 6000
+```
+
+> Tip: If you also pass `--resume-if-exists`, warm-chaining will try to continue from an existing `chkpnt<N>.pth` inside each model folder. If the expected checkpoint is missing, that next frame will fall back to cold start for safety.
 
 ---
 
@@ -192,7 +283,7 @@ This A+B merge workflow assumes:
 ### Known issues / limitations (current)
 - The merge quality is sensitive to **lighting mismatch** and **background occlusions**.
 - The current approach still reconstructs **full B frames** (but with fewer iterations), so the merged result is **not as clean** as fully independent, high-quality per-frame training.
-- The big upside is **speed**: typically **~25% of the time** of “train-everything-independently” for the same sequence length (your mileage may vary).
+- The big upside is **speed**: typically **~25% of the time** of "train-everything-independently" for the same sequence length (your mileage may vary).
 
 ### Current direction / roadmap
 The long-term plan is to make merging robust and higher quality by:
@@ -206,13 +297,13 @@ The long-term plan is to make merging robust and higher quality by:
 - Windows PowerShell: `scripts/run_tacv_pipeline.ps1`
 
 These scripts implement:
-1) Fine-train A  
-2) Batch-train B (coarse)  
-3) Pack A and B  
-4) Precompute residual masks  
-5) Build filtered B-only (players)  
-6) Pack filtered B-only  
-7) Server renders **A+B merged on-the-fly**  
+1) Fine-train A
+2) Batch-train B (coarse)
+3) Pack A and B
+4) Precompute residual masks
+5) Build filtered B-only (players)
+6) Pack filtered B-only
+7) Server renders **A+B merged on-the-fly**
 8) `ta_test` evaluates the **merged** result
 
 ---
@@ -220,18 +311,50 @@ These scripts implement:
 ## Repository entry points
 
 Common entry scripts:
-- `train.py` — single scene training (non-time-indexed)
-- `ta_train.py` — time-indexed per-frame training
-- `ta_pack.py` — pack per-frame models (and/or a single PLY) into `.pt`
-- `ta_server_slots.py` — GUI server for browsing / rendering per-frame models
-- `ta_test.py` — per-frame rendering + evaluation
-- `make_residual_masks.py` — (experimental) residual mask generation
-- `merge_A_B_batch.py` — (experimental) A+B merge helper
+- `train.py` - single scene training (non-time-indexed)
+- `ta_train.py` - time-indexed per-frame training
+- `ta_pack.py` - pack per-frame models (and/or a single PLY) into `.pt`
+- `ta_server_slots.py` - GUI server for browsing / rendering per-frame models
+- `ta_test.py` - per-frame rendering + evaluation
+- `make_residual_masks.py` - (experimental) residual mask generation
+- `merge_A_B_batch.py` - (experimental) A+B merge helper
+
 
 ---
 
-## For companies (quick highlight)
+## Credits and attribution
 
-- Built a **3DGS variant of TACV** for simulating **dynamic sports scenes** under the assumption of **pre-calibrated stadium rigs** and (optionally) **LiDAR points** for initialization.
-- Provides an end-to-end toolchain: **per-frame training → packing → server GUI → evaluation**.
-- Next step: **accurate player localization** and **player-only 3DGS reconstruction**, while the stadium is represented as a mesh and fused at render time.
+If you use this repository (code, scripts, evaluation, or the TA server) in academic work or a product prototype, please **credit the project and the author contributions**.
+
+### Author contribution
+- **TA-3DGS (this repository)**: designed and implemented by **Yunxiao (Jack) Zhang**.
+- Includes the time-indexed training/evaluation toolchain (`ta_train.py`, `ta_test.py`, `ta_pack.py`, TA server GUI), and the experimental A+B merge pipeline.
+
+### Related repositories
+- **TACV (parent project / concept)**: **[Time-Archival Camera Virtualization for Visual Performance and Sports](https://github.com/JackZhang-SH/Time-Archival-Camera-Virtualization-for-Visual-Performance-and-Sports.git)**.
+- **RS Studio (dataset exporter / tooling)**: **[RealSynth Studio](https://github.com/JackZhang-SH/RealSynth_Studio.git)**.
+
+### Upstream and third-party components
+TA-3DGS is built on top of the 3D Gaussian Splatting ecosystem and includes submodules such as:
+- diff-gaussian-rasterization
+- simple-knn
+- fused-ssim
+
+Please follow the original licenses of those components.
+
+### Suggested acknowledgement text
+You can paste the following in your paper/repo README:
+
+> This work uses TA-3DGS (Time Archival 3D Gaussian Splatting) by Yunxiao (Jack) Zhang, a time-indexed 3D Gaussian Splatting system for dynamic sports scenes built on top of the 3DGS ecosystem and TACV.
+
+### BibTeX (repo-level citation)
+Update fields as needed (year/version/URL):
+
+```bibtex
+@misc{zhang_ta3dgs,
+  title        = {Time Archival 3D Gaussian Splatting (TA-3DGS)},
+  author       = {Zhang, Yunxiao},
+  howpublished = {\url{https://github.com/JackZhang-SH/TimeArchival3DGS}},
+  year         = {2026}
+}
+```

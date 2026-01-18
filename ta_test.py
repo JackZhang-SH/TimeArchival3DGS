@@ -377,6 +377,7 @@ def test_one_frame(frame_idx: int,
             # -------------------- COLMAP camera timing --------------------
             t_cam0 = time.perf_counter()
             view = load_cam_from_colmap(gt_frame_dir, name, sparse_id, znear, zfar)
+
             t_cam1 = time.perf_counter()
             dt_cam = t_cam1 - t_cam0
             colmap_time_total += dt_cam
@@ -549,7 +550,7 @@ def main(argv=None):
     gt_root = Path(args.gt_root).resolve()
     models_root = Path(args.models_root).resolve()
 
-    frames = parse_frames(args.frames, models_root, args.prefix)
+    frames = parse_frames(args.frames)
     if not frames:
         print("[ERROR] No frames matched under models_root with given --frames / --prefix")
         sys.exit(1)
