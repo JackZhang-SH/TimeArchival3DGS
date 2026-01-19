@@ -205,30 +205,38 @@ def readColmapSceneInfo(path, images, depths, eval, train_test_exp, llffhold=8):
     default_ply_path = os.path.join(path, "sparse/0/points3D.ply")
     bin_path = os.path.join(path, "sparse/0/points3D.bin")
     txt_path = os.path.join(path, "sparse/0/points3D.txt")
-    # 如果设置了 AABB_JSON，则强制重建一个“被裁剪”的 ply，并优先使用它
+    have_points3d = (os.path.exists(default_ply_path) or os.path.exists(bin_path) or os.path.exists(txt_path))
     aabb_json = os.environ.get("AABB_JSON", None)
     if aabb_json:
         ply_path = os.path.join(path, "sparse/0/points3D__aabb.ply")
-        # 总是重建：确保应用最新的 AABB 过滤
-        try:
-            xyz, rgb, _ = read_points3D_binary(bin_path)
-        except Exception:
-            xyz, rgb, _ = read_points3D_text(txt_path)
-        # 这里的 read_points3D_* 已经在 colmap_loader 里应用了 _apply_aabb_filter
-        storePly(ply_path, xyz, rgb)
-        print(f"[AABB] kept {xyz.shape[0]} points -> {ply_path}")
-    else:
-        ply_path = default_ply_path
-        if not os.path.exists(ply_path):
-            print("Converting point3d.bin to .ply, will happen only the first time you open the scene.")
+
+        if os.path.exists(bin_path) or os.path.exists(txt_path):
             try:
                 xyz, rgb, _ = read_points3D_binary(bin_path)
             except Exception:
                 xyz, rgb, _ = read_points3D_text(txt_path)
             storePly(ply_path, xyz, rgb)
+            print(f"[AABB] kept {xyz.shape[0]} points -> {ply_path}")
+        else:
+            print(f"[AABB][WARN] No points3D.(bin/txt) found under {path}/sparse/0; skip point cloud.")
+            ply_path = None
+    else:
+        ply_path = default_ply_path if have_points3d else None
+        if ply_path is not None and (not os.path.exists(ply_path)):
+            # 只有在 bin/txt 存在时才尝试转换；否则允许缺失（warm-start 后续帧）
+            if os.path.exists(bin_path) or os.path.exists(txt_path):
+                print("Converting point3d.bin/txt to .ply, will happen only the first time you open the scene.")
+                try:
+                    xyz, rgb, _ = read_points3D_binary(bin_path)
+                except Exception:
+                    xyz, rgb, _ = read_points3D_text(txt_path)
+                storePly(ply_path, xyz, rgb)
+            else:
+                print(f"[WARN] No COLMAP points3D.(ply/bin/txt) under {path}/sparse/0; continue without point cloud.")
+                ply_path = None
 
     try:
-        pcd = fetchPly(ply_path)
+        pcd = fetchPly(ply_path) if ply_path is not None else None
     except Exception:
         pcd = None
 

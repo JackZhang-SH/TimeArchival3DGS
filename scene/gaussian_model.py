@@ -21,7 +21,7 @@ from utils.sh_utils import RGB2SH
 from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
-
+from typing import Sequence
 try:
     from diff_gaussian_rasterization import SparseGaussianAdam
 except:
@@ -45,7 +45,15 @@ class GaussianModel:
         self.inverse_opacity_activation = inverse_sigmoid
 
         self.rotation_activation = torch.nn.functional.normalize
-
+    def init_exposure_from_cams(self, cam_infos: Sequence):
+        """
+        Initialize per-image exposure parameters WITHOUT touching Gaussian xyz/features.
+        Needed for warm-start from checkpoint because checkpoints don't store _exposure.
+        """
+        self.exposure_mapping = {getattr(c, "image_name", str(i)): i for i, c in enumerate(cam_infos)}
+        self.pretrained_exposures = None
+        exposure = torch.eye(3, 4, device="cuda")[None].repeat(len(cam_infos), 1, 1)
+        self._exposure = nn.Parameter(exposure.requires_grad_(True))
 
     def __init__(self, sh_degree, optimizer_type="default"):
         self.active_sh_degree = 0
@@ -81,7 +89,10 @@ class GaussianModel:
             self.spatial_lr_scale,
         )
     
-    def restore(self, model_args, training_args):
+    def restore(
+        self, model_args, training_args,
+        load_optimizer_state: bool = True
+    ):
         (self.active_sh_degree, 
         self._xyz, 
         self._features_dc, 
@@ -94,10 +105,18 @@ class GaussianModel:
         denom,
         opt_dict, 
         self.spatial_lr_scale) = model_args
+        # Always rebuild optimizers/schedulers from *current* training_args
         self.training_setup(training_args)
-        self.xyz_gradient_accum = xyz_gradient_accum
-        self.denom = denom
-        self.optimizer.load_state_dict(opt_dict)
+
+        if load_optimizer_state:
+            # True resume: keep optimizer momentum + densify stats
+            self.xyz_gradient_accum = xyz_gradient_accum
+            self.denom = denom
+            self.optimizer.load_state_dict(opt_dict)
+        else:
+            # Warm-start init: copy params only, restart optimizer & stats
+            # (training_setup already created zero accumulators, keep them)
+            self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
     @property
     def get_scaling(self):
@@ -170,10 +189,7 @@ class GaussianModel:
         self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
-        self.exposure_mapping = {cam_info.image_name: idx for idx, cam_info in enumerate(cam_infos)}
-        self.pretrained_exposures = None
-        exposure = torch.eye(3, 4, device="cuda")[None].repeat(len(cam_infos), 1, 1)
-        self._exposure = nn.Parameter(exposure.requires_grad_(True))
+        self.init_exposure_from_cams(cam_infos)
 
     def training_setup(self, training_args):
         self.percent_dense = training_args.percent_dense

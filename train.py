@@ -46,7 +46,7 @@ except Exception:
     SPARSE_ADAM_AVAILABLE = False
 
 
-def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, reset_checkpoint_iter: bool = False,):
+def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, reset_checkpoint_iter: bool = False, reset_optimizer: bool = False):
 
     if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
         sys.exit(
@@ -56,8 +56,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
-    scene = Scene(dataset, gaussians)
-    gaussians.training_setup(opt)
+    warm_start = checkpoint is not None
+    scene = Scene(dataset, gaussians, warm_start=warm_start)
 
     # ---- TA: allow specifying test images at train time (by file name or stem, or regex) ----
     import re
@@ -127,10 +127,15 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     if checkpoint:
         model_params, ckpt_iter = torch.load(checkpoint)
-        gaussians.restore(model_params, opt)
-        # reset_checkpoint_iter=True 表示：忽略保存的迭代号，把 checkpoint 当作“初始化”
-        first_iter = 0 if reset_checkpoint_iter else ckpt_iter
+        # If reset_optimizer: treat checkpoint as pure initialization (copy params only)
+        gaussians.restore(model_params, opt, load_optimizer_state=(not reset_optimizer))
 
+        # restart schedule from 0 when we reset optimizer (recommended)
+        effective_reset = reset_checkpoint_iter or reset_optimizer
+        first_iter = 0 if effective_reset else ckpt_iter
+    else:
+        # Cold start: scene has initialized gaussians from point cloud; now setup optimizer
+        gaussians.training_setup(opt)
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
@@ -464,6 +469,11 @@ if __name__ == "__main__":
         help="Image names or stems to move from train to test (match against final work/images names).",
     )
     parser.add_argument(
+        "--reset_optimizer",
+        action="store_true",
+        help="When using --start_checkpoint, do NOT load optimizer state (copy params only) and restart optimizers.",
+    )
+    parser.add_argument(
         "--test_regex",
         type=str,
         default=None,
@@ -511,6 +521,7 @@ if __name__ == "__main__":
         args.start_checkpoint,
         args.debug_from,
         args.reset_start_iter,
+        args.reset_optimizer,
     )
 
     print("\nTraining complete.")

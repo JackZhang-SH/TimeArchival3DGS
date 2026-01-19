@@ -22,7 +22,7 @@ class Scene:
 
     gaussians : GaussianModel
 
-    def __init__(self, args : ModelParams, gaussians : GaussianModel, load_iteration=None, shuffle=True, resolution_scales=[1.0]):
+    def __init__(self, args : ModelParams, gaussians : GaussianModel, load_iteration=None, shuffle=True, resolution_scales=[1.0], warm_start: bool = False):
         """b
         :param path: Path to colmap scene main folder.
         """
@@ -49,8 +49,7 @@ class Scene:
             assert False, "Could not recognize scene type!"
 
         if not self.loaded_iter:
-            with open(scene_info.ply_path, 'rb') as src_file, open(os.path.join(self.model_path, "input.ply") , 'wb') as dest_file:
-                dest_file.write(src_file.read())
+            # Always write cameras.json (useful for debugging/visualization)
             json_cams = []
             camlist = []
             if scene_info.test_cameras:
@@ -61,7 +60,25 @@ class Scene:
                 json_cams.append(camera_to_JSON(id, cam))
             with open(os.path.join(self.model_path, "cameras.json"), 'w') as file:
                 json.dump(json_cams, file)
+            # Warm-start: point cloud is optional for non-first frames.
+            if scene_info.ply_path and os.path.exists(scene_info.ply_path):
+                with open(scene_info.ply_path, 'rb') as src_file, open(os.path.join(self.model_path, "input.ply") , 'wb') as dest_file:
+                    dest_file.write(src_file.read())
+            else:
+                if not warm_start:
+                    raise FileNotFoundError(
+                        f"[Scene] Point cloud not found for cold start. Expected ply at: {scene_info.ply_path}. "
+                        f"Provide points3D.(ply/bin/txt) for the first frame, or use --start_checkpoint for warm start."
+                    )
+                else:
+                    print("[Scene][warm_start] No point cloud found in dataset; skipping input.ply copy.")
 
+            # Warm-start needs exposure params even if we don't init Gaussians from point cloud
+            if warm_start:
+                try:
+                    self.gaussians.init_exposure_from_cams(camlist)
+                except Exception as e:
+                    print(f"[Scene][warm_start][WARN] init exposure failed: {e}")
         if shuffle:
             random.shuffle(scene_info.train_cameras)  # Multi-res consistent random shuffling
             random.shuffle(scene_info.test_cameras)  # Multi-res consistent random shuffling
@@ -80,7 +97,24 @@ class Scene:
                                                            "iteration_" + str(self.loaded_iter),
                                                            "point_cloud.ply"), args.train_test_exp)
         else:
-            self.gaussians.create_from_pcd(scene_info.point_cloud, scene_info.train_cameras, self.cameras_extent)
+            if warm_start:
+                # In warm-start mode, Gaussians are expected to be restored from checkpoint later in train.py.
+                try:
+                    empty = (self.gaussians.get_xyz.numel() == 0)
+                except Exception:
+                    empty = True
+
+                if empty:
+                    if scene_info.point_cloud is not None:
+                        # Optional fallback: allow init from pcd if it exists (e.g. first warm-start frame)
+                        self.gaussians.create_from_pcd(scene_info.point_cloud, scene_info.train_cameras, self.cameras_extent)
+                    else:
+                        print("[Scene][warm_start] No point cloud and gaussians are empty for now; expecting checkpoint restore.")
+
+            else:
+                if scene_info.point_cloud is None:
+                    raise RuntimeError("[Scene] Cold start requires a point cloud, but none was found.")
+                self.gaussians.create_from_pcd(scene_info.point_cloud, scene_info.train_cameras, self.cameras_extent)
 
     def save(self, iteration):
         point_cloud_path = os.path.join(self.model_path, "point_cloud/iteration_{}".format(iteration))

@@ -199,7 +199,7 @@ def main(argv: List[str]) -> None:
         # Build train flags for this frame (inject --start_checkpoint if warm_chain & we have one)
         frame_train_flags = list(base_train_flags)
         if args.warm_chain and prev_ckpt is not None:
-            frame_train_flags += ["--start_checkpoint", str(prev_ckpt), "--reset_start_iter"]
+            frame_train_flags += ["--start_checkpoint", str(prev_ckpt), "--reset_start_iter", "--reset_optimizer"]
             print(f"[TA-Train][warm_chain] frame_{i}: warm-start from {prev_ckpt}")
 
         # Build command for subprocess

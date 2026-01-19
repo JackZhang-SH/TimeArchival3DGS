@@ -170,7 +170,7 @@ python train.py --source_path ./dataset/my_scene --model_path ./output/my_scene 
   --densify_until_iter 0 --densification_interval 0
 ```
 
-### Enabling warm start (correct `ta_train.py` command)
+### Enabling warm start
 
 Warm start for time-indexed training is enabled by **`ta_train.py --warm_chain`**.
 
