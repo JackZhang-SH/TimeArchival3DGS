@@ -1,11 +1,15 @@
 # Time Archival 3DGS (TA-3DGS)
 
-TA-3DGS is a **3D Gaussian Splatting (3DGS)** variant of  **[TACV (Time-Archival Camera Virtualization)](https://github.com/JackZhang-SH/Time-Archival-Camera-Virtualization-for-Visual-Performance-and-Sports.git)**: a dynamic sports scene is represented as a **time-indexed set of multi-view snapshots**, and we train / render / evaluate **per time step (per frame folder)**.
+TA-3DGS is a **3D Gaussian Splatting (3DGS)** variant of  **[TACV (Time-Archival Camera Virtualization)](https://github.com/JackZhang-SH/Time-Archival-Camera-Virtualization-for-Visual-Performance-and-Sports)**: a dynamic sports scene is represented as a **time-indexed set of multi-view snapshots**, and we train / render / evaluate **per time step (per frame folder)**.
+**Paper status:** TACV manuscript under revision at *Computer Vision and Image Understanding (CVIU)*.
+Code is released now; a paper link/preprint will be added when publicly available.
+**Preprint:** Not publicly available yet.
 
-This repository is intended to pair nicely with **[RS Studio](https://github.com/JackZhang-SH/RealSynth_Studio.git)** exports (COLMAP + 3DGS Surface Points), i.e., **COLMAP-style frames + `fused_points.ply`** for convenient initialization and training.
+
+This repository is intended to pair nicely with **[RS Studio](https://github.com/JackZhang-SH/RealSynth_Studio)** exports (COLMAP + 3DGS Surface Points), i.e., **COLMAP-style frames + `fused_points.ply`** for convenient initialization and training.
 
 
-![GT (left) vs Render (right)](assets/demo.gif)
+![GT (left) vs Render (right)](./assets/demo.gif)
 
 *Left: GT video | Right: Render video*
 
@@ -27,6 +31,8 @@ The stable path focuses on a robust baseline workflow:
 ---
 
 ## Installation (tested on RunPod Linux)
+**Note:** This setup assumes an NVIDIA driver compatible with CUDA 12.1 (check `nvidia-smi`).  
+If your driver/CUDA differs, install the matching PyTorch wheel.
 
 Below is the exact setup I tested on a RunPod Linux server.
 
@@ -78,6 +84,11 @@ Several prepared TA-3DGS datasets are available here:
 
 Download the folder and place the dataset under `./dataset/` (keep the original subfolder names, e.g., `frame_1/`, `frame_2/`, ...).
 
+### Dataset note
+The shared datasets are provided for **research and evaluation** purposes.  
+Please ensure you have the rights to use any third-party assets contained in the data (e.g., captured footage / game renders).
+**Please do not redistribute** third-party content without permission from the original rights holders.
+
 **Folder naming convention (A vs B):**
 - Folders with **`A`** in the name contain **static stadium/environment only (no players)** - intended for training a **high-quality static background 3DGS**.
 - Folders with **`B`** in the name contain **stadium + players (dynamic scene)** - intended for **per-frame (time-indexed) training** where moving actors are present.
@@ -87,14 +98,17 @@ A typical TA-3DGS dataset root looks like:
 ```
 
 dataset/<scene_name>/
-frame_1/
-images/
-sparse/0/              # COLMAP output (optional depending on your pipeline)
-fused_points.ply       # optional 3DGS init points (recommended)
-frame_2/
-...
-frame_N/
-...
+  frame_1/
+    images/
+    sparse/0/            # COLMAP output (optional)
+    fused_points.ply     # optional 3DGS init points (recommended)
+  frame_2/
+    images/
+    sparse/0/
+    fused_points.ply
+  ...
+  frame_N/
+    ...
 
 ```
 
@@ -324,23 +338,28 @@ Common entry scripts:
 
 ## Credits and attribution
 
-If you use this repository (code, scripts, evaluation, or the TA server) in academic work or a product prototype, please **credit the project and the author contributions**.
+If you use this repository in academic work, please cite the project.  
+For other usage, please follow the license terms and the third-party licenses of submodules.
 
-### Author contribution
-- **TA-3DGS (this repository)**: designed and implemented by **Yunxiao (Jack) Zhang**.
-- Includes the time-indexed training/evaluation toolchain (`ta_train.py`, `ta_test.py`, `ta_pack.py`, TA server GUI), and the experimental A+B merge pipeline.
+**Maintainer:** Yunxiao (Jack) Zhang  
+For questions, please open an issue or contact me.
 
 ### Related repositories
-- **TACV (parent project / concept)**: **[Time-Archival Camera Virtualization for Visual Performance and Sports](https://github.com/JackZhang-SH/Time-Archival-Camera-Virtualization-for-Visual-Performance-and-Sports.git)**.
-- **RS Studio (dataset exporter / tooling)**: **[RealSynth Studio](https://github.com/JackZhang-SH/RealSynth_Studio.git)**.
+- **TACV (parent project / concept)**: **[Time-Archival Camera Virtualization for Visual Performance and Sports](https://github.com/JackZhang-SH/Time-Archival-Camera-Virtualization-for-Visual-Performance-and-Sports)**.
+- **RS Studio (dataset exporter / tooling)**: **[RealSynth Studio](https://github.com/JackZhang-SH/RealSynth_Studio)**.
 
-### Upstream and third-party components
-TA-3DGS is built on top of the 3D Gaussian Splatting ecosystem and includes submodules such as:
-- diff-gaussian-rasterization
-- simple-knn
-- fused-ssim
+## License
 
-Please follow the original licenses of those components.
+This repository contains and depends on components derived from the original **gaussian-splatting** project.
+
+- **Upstream (gaussian-splatting) license:** see `LICENSE.md` (**research/evaluation only; non-commercial**).
+- **Third-party submodules:** see their respective licenses in `submodules/`.
+
+When using, redistributing, or building on this repository as a whole (including upstream-derived code), the **gaussian-splatting license terms apply**.
+
+For any use beyond research/evaluation (e.g., commercial/product use), please follow the upstream license and contact the original licensors if required.
+
+
 
 ### Suggested acknowledgement text
 You can paste the following in your paper/repo README:
