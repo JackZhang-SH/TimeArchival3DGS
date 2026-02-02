@@ -1,8 +1,8 @@
 # Time Archival 3DGS (TA-3DGS)
 
-TA-3DGS is a **3D Gaussian Splatting (3DGS)** variant of  **[TACV (Time-Archival Camera Virtualization)](https://github.com/JackZhang-SH/Time-Archival-Camera-Virtualization-for-Visual-Performance-and-Sports)**: a dynamic sports scene is represented as a **time-indexed set of multi-view snapshots**, and we train / render / evaluate **per time step (per frame folder)**.
-**Paper status:** TACV manuscript under revision at *Computer Vision and Image Understanding (CVIU)*.
-Code is released now; a paper link/preprint will be added when publicly available.
+TA-3DGS is a **3D Gaussian Splatting (3DGS)** variant of  **[TACV (Time-Archival Camera Virtualization)](https://github.com/JackZhang-SH/Time-Archival-Camera-Virtualization-for-Visual-Performance-and-Sports)**: a dynamic sports scene is represented as a **time-indexed set of multi-view snapshots**, and we train / render / evaluate **per time step (per frame folder)**.  
+**Paper status:** TACV manuscript under revision at *Computer Vision and Image Understanding (CVIU)*.  
+Code is released now; a paper link/preprint will be added when publicly available.  
 **Preprint:** Not publicly available yet.
 
 
