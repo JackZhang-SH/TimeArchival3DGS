@@ -1,6 +1,6 @@
 # Time Archival 3DGS (TA-3DGS)
 
-TA-3DGS is a **3D Gaussian Splatting (3DGS)** variant of  **[TACV (Time-Archival Camera Virtualization)](https://github.com/JackZhang-SH/Time-Archival-Camera-Virtualization-for-Visual-Performance-and-Sports)**: a dynamic sports scene is represented as a **time-indexed set of multi-view snapshots**, and we train / render / evaluate **per time step (per frame folder)**.  
+TA-3DGS is a **3D Gaussian Splatting (3DGS)** variant of  **[TACV (Time-Archival Camera Virtualization)](https://github.com/JackZhang-SH/Time-Archival-Camera-Virtualization-for-Sports-and-Visual-Performance)**: a dynamic sports scene is represented as a **time-indexed set of multi-view snapshots**, and we train / render / evaluate **per time step (per frame folder)**.  
 **Paper status:** TACV manuscript under revision at *Computer Vision and Image Understanding (CVIU)*.  
 Code is released now; a paper link/preprint will be added when publicly available.  
 **Preprint:** Not publicly available yet.
@@ -345,7 +345,7 @@ For other usage, please follow the license terms and the third-party licenses of
 For questions, please open an issue or contact me.
 
 ### Related repositories
-- **TACV (parent project / concept)**: **[Time-Archival Camera Virtualization for Visual Performance and Sports](https://github.com/JackZhang-SH/Time-Archival-Camera-Virtualization-for-Visual-Performance-and-Sports)**.
+- **TACV (parent project / concept)**: **[Time-Archival Camera Virtualization for Sports and Visual Performance](https://github.com/JackZhang-SH/Time-Archival-Camera-Virtualization-for-Sports-and-Visual-Performance)**.
 - **RS Studio (dataset exporter / tooling)**: **[RealSynth Studio](https://github.com/JackZhang-SH/RealSynth_Studio)**.
 
 ## License
