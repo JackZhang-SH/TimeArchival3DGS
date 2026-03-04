@@ -6,32 +6,19 @@ import math
 import argparse
 from PIL import Image
 
-# =============================================================================
-# 核心修复：复刻 RS Studio (core.py) 的矩阵变换逻辑 (Blender Z-up -> 3DGS)
-# =============================================================================
 def get_colmap_from_blender_matrix(c2w_blender_list):
     M_bl = np.array(c2w_blender_list)
-    
-    # 1. 定义局部坐标系修正矩阵 T
-    # Blender Local: Right(X), Up(Y), Back(Z) -> View is -Z
-    # COLMAP Local: Right(X), Down(Y), Fwd(Z) -> View is +Z
-    # 变换: X->X, Y->-Y, Z->-Z
     T = np.array([
         [1,  0,  0,  0],
         [0, -1,  0,  0],
         [0,  0, -1,  0],
         [0,  0,  0,  1]
     ])
-    
-    # 2. 计算 w2c
     try:
         M_bl_inv = np.linalg.inv(M_bl)
     except np.linalg.LinAlgError:
         return None, None
-
-    # 保持世界坐标系不变 (Z-up), 只修正相机朝向
     M_w2cv = T @ M_bl_inv
-    
     R = M_w2cv[:3, :3]
     tvec = M_w2cv[:3, 3]
     qvec = rotmat2qvec(R)
@@ -85,7 +72,6 @@ def process_frame(in_frame_dir, out_frame_dir, frame_name):
         "cx": None, "cy": None, "k1": 0, "k2": 0, "p1": 0, "p2": 0
     }
     
-    # 强制前缀，区分 Train/Test
     json_tasks = [
         ("transforms.json", "train_"),
         ("transforms_train.json", "train_"),
@@ -95,7 +81,6 @@ def process_frame(in_frame_dir, out_frame_dir, frame_name):
     
     all_frames = []
     
-    # 1. 读取 JSON
     for jf_name, prefix in json_tasks:
         p = os.path.join(in_frame_dir, jf_name)
         if not os.path.exists(p): continue
@@ -132,39 +117,30 @@ def process_frame(in_frame_dir, out_frame_dir, frame_name):
         if rel_path.startswith("./"): rel_path = rel_path[2:]
         src_path = os.path.join(in_frame_dir, rel_path)
         
-        # 路径容错
         if not os.path.exists(src_path):
             basename = os.path.basename(rel_path)
             if os.path.exists(os.path.join(in_frame_dir, basename)): src_path = os.path.join(in_frame_dir, basename)
             elif os.path.exists(os.path.join(in_frame_dir, "images", basename)): src_path = os.path.join(in_frame_dir, "images", basename)
             else: continue
 
-        # 命名处理
         original_basename = os.path.basename(rel_path)
         prefix = frame['_output_prefix']
         final_img_name = original_basename if original_basename.startswith(prefix) else f"{prefix}{original_basename}"
         
         dst_path = os.path.join(images_dir, final_img_name)
         
-        # === [新增功能] 强制处理透明背景 -> 白底 ===
-        # 如果目标文件不存在，才进行处理
+        # === [修改] 强制处理透明背景 -> 黑底 (0,0,0) ===
         if not os.path.exists(dst_path):
             with Image.open(src_path) as img:
-                # 检查是否有透明通道
                 if img.mode == 'RGBA':
-                    # 创建纯白背景 (255, 255, 255)
-                    # 如果想要黑底，改成 (0, 0, 0)
-                    background = Image.new('RGB', img.size, (255, 255, 255))
-                    # 将图片粘贴到白底上，使用 Alpha 通道作为 Mask
+                    # Black Background
+                    background = Image.new('RGB', img.size, (0, 0, 0))
                     background.paste(img, mask=img.split()[3])
                     background.save(dst_path, quality=100)
                 else:
-                    # 如果没有透明通道，直接复制或保存
-                    if img.mode != 'RGB':
-                        img = img.convert('RGB')
+                    if img.mode != 'RGB': img = img.convert('RGB')
                     img.save(dst_path, quality=100)
         
-        # 读取图片尺寸
         w = int(frame.get("w", global_params["w"] or 0))
         h = int(frame.get("h", global_params["h"] or 0))
         if w == 0:
@@ -185,7 +161,6 @@ def process_frame(in_frame_dir, out_frame_dir, frame_name):
             camera_id_counter += 1
         cam_id = cameras[cam_key]
 
-        # 核心坐标转换
         qvec, tvec = get_colmap_from_blender_matrix(frame["transform_matrix"])
         if qvec is None: continue
 
@@ -198,7 +173,6 @@ def process_frame(in_frame_dir, out_frame_dir, frame_name):
         })
         image_id_counter += 1
 
-    # 写入 COLMAP 格式文件
     with open(os.path.join(sparse_dir, "cameras.txt"), "w") as f:
         f.write("# Camera list with one line of data per camera:\n")
         f.write("# CAMERA_ID, MODEL, WIDTH, HEIGHT, PARAMS[]\n")
@@ -214,13 +188,12 @@ def process_frame(in_frame_dir, out_frame_dir, frame_name):
             t = img["tvec"]
             f.write(f"{img['id']} {q[0]} {q[1]} {q[2]} {q[3]} {t[0]} {t[1]} {t[2]} {img['camera_id']} {img['name']}\n\n")
 
-    # 生成 Dummy points3D.txt (会被 run 脚本处理，但保留一个防止 COLMAP 报错)
     with open(os.path.join(sparse_dir, "points3D.txt"), "w") as f:
         f.write("# 3D point list with one line of data per point:\n")
         f.write("# POINT3D_ID, X, Y, Z, R, G, B, ERROR, TRACK[] as (IMAGE_ID, POINT2D_IDX)\n")
         f.write("1 0 0 0 128 128 128 0.0\n")
 
-    print(f"  -> Done. {len(images)} images processed (White Background applied).")
+    print(f"  -> Done. {len(images)} images processed (Black Background applied).")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
