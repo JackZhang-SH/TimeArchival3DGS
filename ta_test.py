@@ -33,7 +33,7 @@ Usage examples:
 import argparse, json, math, os, re, sys, time, tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
-
+from torchvision.transforms import InterpolationMode
 import torch
 import torchvision.transforms.functional as TF
 import numpy as np
@@ -151,7 +151,26 @@ def _resolve_ply(model_dir: Path, iteration: int) -> Path:
     if m is not None:
         return m
     raise FileNotFoundError(f"No PLY found under {model_dir} (iteration or merged fallback)")
+def composite_rgba_to_rgb(t_full: torch.Tensor, bg: float = 1.0) -> torch.Tensor:
+    """
+    t_full: (C,H,W) float32 in [0,1], C can be 3 or 4
+    bg: background color value in [0,1], 1.0=white, 0.0=black
 
+    return: (3,H,W) RGB after alpha compositing on a solid bg
+    """
+    if t_full.shape[0] < 4:
+        # already RGB (or grayscale)
+        if t_full.shape[0] == 1:
+            return t_full.repeat(3, 1, 1)
+        return t_full[:3, :, :]
+
+    rgb = t_full[:3, :, :]
+    a   = t_full[3:4, :, :]  # (1,H,W)
+
+    bg_rgb = torch.full_like(rgb, bg)  # (3,H,W)
+    # Standard "over" compositing: out = rgb*a + bg*(1-a)
+    out = rgb * a + bg_rgb * (1.0 - a)
+    return out
 
 def _resolve_b_ply(model_dir: Path, iteration: int) -> Path:
     """
@@ -247,7 +266,28 @@ def _choose_test_names(gt_images_dir: Path,
 
     return names
 
+def masked_psnr(b_out: torch.Tensor,
+                b_gt: torch.Tensor,
+                b_mask: torch.Tensor,
+                eps: float = 1e-10) -> float:
+    """
+    b_out, b_gt: (1, 3, H, W), range [0,1], CUDA
+    b_mask     : (1, 1, H, W), 1=valid pixel, 0=ignore, CUDA
 
+    PSNR computed only over valid pixels (mask==1).
+    """
+    # broadcast mask to 3 channels
+    diff2 = (b_out - b_gt) ** 2
+    diff2 = diff2 * b_mask  # (1,3,H,W) * (1,1,H,W) -> broadcast
+
+    denom = b_mask.sum() * b_out.shape[1]  # valid_pixels * 3
+    if denom.item() <= 0:
+        return float("nan")
+
+    mse = diff2.sum() / denom
+    mse = torch.clamp(mse, min=eps)
+    psnr_val = 10.0 * torch.log10(1.0 / mse)  # MAX=1
+    return float(psnr_val.item())
 # ------------------------- Feature alignment helper -------------------------
 # ------------------------- Visualization helpers -------------------------
 def _tensor_to_pil_chw01(t: torch.Tensor) -> Image.Image:
@@ -400,23 +440,29 @@ def test_one_frame(frame_idx: int,
 
             # Load GT
             gt_path = images_dir / name
-            gt_img = Image.open(str(gt_path))
+            gt_img = Image.open(str(gt_path)).convert("RGBA")  # 强制 RGBA，保证 alpha 可用
 
             # out is CHW CUDA tensor in [0,1]
-            t_out = out.detach().clamp(0, 1).cpu().to(torch.float32)   # (C,H,W)
-            # GT as RGB float tensor in [0,1]
-            t_gt = TF.to_tensor(gt_img).to(torch.float32)[:3, :, :]
+            t_out = out.detach().clamp(0, 1).cpu().to(torch.float32)  # (3,H,W)
 
-            # Ensure same size
+            t_full = TF.to_tensor(gt_img).to(torch.float32)  # (4,H,W) in [0,1]
+
+            # ✅ 把透明区域合成到白底（与 render 的 white_background 对齐）
+            # 如果你有时用黑底渲染，就把 bg=0.0
+            t_gt = composite_rgba_to_rgb(t_full, bg=1.0)  # (3,H,W)
+
+            # Ensure same size (resize GT and mask to match render)
             if t_out.shape[-2:] != t_gt.shape[-2:]:
                 t_gt = TF.resize(t_gt, t_out.shape[-2:], antialias=True)
-
             # Metrics expect batched tensors on CUDA
             b_out = t_out.unsqueeze(0).cuda()
-            b_gt = t_gt.unsqueeze(0).cuda()
+            b_gt  = t_gt.unsqueeze(0).cuda()
+
             ssims.append(float(ssim(b_out, b_gt)))
-            psnrs.append(float(psnr(b_out, b_gt)))
             lpipss.append(float(lpips(b_out, b_gt, net_type=lpips_net)))
+
+            # ✅ 普通 PSNR（全图，白底一致）
+            psnrs.append(float(psnr(b_out, b_gt)))
 
             torch.cuda.synchronize()
             t_metric1 = time.perf_counter()

@@ -24,7 +24,7 @@ LAST_FRAME=$(echo $FRAMES | cut -d'-' -f2)
 # ==========================================
 # 2. Preparation
 # ==========================================
-echo -e "${CYAN}>>> [1/2] Converting Data (Black BG) & Injecting GT Point Cloud...${NC}"
+echo -e "${CYAN}>>> [1/2] Converting Data & Injecting GT Point Cloud...${NC}"
 
 if [ -f "convert_to_colmap.py" ]; then
     python convert_to_colmap.py -i "$RAW_DATA_DIR" -o "$TA_DATA_DIR"
@@ -55,12 +55,11 @@ do
     
     if [ "$i" -eq "$FIRST_FRAME" ]; then
         echo -e "${GREEN}>>> Training Frame $i (ANCHOR)${NC}"
-        # [修改] 移除了 --white_background (默认为黑底)
         python ta_train.py -s "$TA_DATA_DIR" -o "$OUTPUT_DIR" --frames "$i" -- \
             --disable_viewer -r 1 --iterations 8000 \
             --densify_until_iter 6000 --opacity_reset_interval 2000 \
             --test_regex "test_.*" \
-            --checkpoint_iterations 8000
+            --checkpoint_iterations 8000 --white_background
     else
         PREV=$((i - 1))
         PREV_CKPT="$OUTPUT_DIR/model_frame_${PREV}/chkpnt8000.pth"
@@ -75,7 +74,7 @@ do
             --test_regex "test_.*" \
             --checkpoint_iterations 8000 \
             --start_checkpoint "$PREV_CKPT" \
-            --reset_start_iter
+            --reset_start_iter --white_background
     fi
     if [ $? -ne 0 ]; then exit 1; fi
 done
@@ -83,6 +82,5 @@ done
 echo -e "\n${CYAN}>>> Evaluating metrics...${NC}"
 # [修改] 移除了 --white_background
 python ta_test.py -s "$TA_DATA_DIR" -m "$OUTPUT_DIR" --frames "$FRAMES" \
-    --prefix model_frame_ --prefer_model_test_list --read_test_from_model_cfg
-
+    --prefix model_frame_ --prefer_model_test_list --read_test_from_model_cfg --save_vis --vis_root "./debug_vis" --white_background
 echo -e "\n${GREEN}>>> SUCCESS!${NC}"
