@@ -69,36 +69,28 @@ def rotmat2qvec(R):
         z = 0.5 * r
     return np.array([w, x, y, z], dtype=np.float64)
 
-def _save_keep_alpha(img: Image.Image, dst_path: str):
+def _save_white_bg(img: Image.Image, dst_path: str):
     """
-    Save image while preserving alpha if present.
-    - If image is RGBA but dst is jpg/jpeg, we switch to PNG to preserve alpha.
-    - Returns (actual_saved_path, actual_filename).
+    Save image by replacing transparent background with solid white.
     """
     ext = os.path.splitext(dst_path)[1].lower()
     os.makedirs(os.path.dirname(dst_path), exist_ok=True)
 
+    # === 核心逻辑：检测透明通道并叠加白底 ===
     if img.mode == "RGBA":
-        if ext in [".jpg", ".jpeg"]:
-            dst_path = os.path.splitext(dst_path)[0] + ".png"
-            ext = ".png"
-        # Save RGBA losslessly
-        img.save(dst_path, compress_level=0)
-        return dst_path, os.path.basename(dst_path)
+        background = Image.new('RGB', img.size, (255, 255, 255))
+        background.paste(img, mask=img.split()[3])
+        img = background
 
-    # Non-alpha images: keep as RGB
+    # 确保图片最终是 RGB 格式
     if img.mode != "RGB":
         img = img.convert("RGB")
 
+    # 根据后缀名保存
     if ext in [".jpg", ".jpeg"]:
         img.save(dst_path, quality=100, subsampling=0, optimize=True)
         return dst_path, os.path.basename(dst_path)
-    elif ext == ".png":
-        img.save(dst_path, compress_level=0)
-        return dst_path, os.path.basename(dst_path)
     else:
-        # fallback to PNG
-        dst_path = os.path.splitext(dst_path)[0] + ".png"
         img.save(dst_path, compress_level=0)
         return dst_path, os.path.basename(dst_path)
 
@@ -183,15 +175,13 @@ def process_frame(in_frame_dir, out_frame_dir, frame_name):
         final_img_name = original_basename if original_basename.startswith(prefix) else f"{prefix}{original_basename}"
         dst_path = os.path.join(images_dir, final_img_name)
 
-        # === 保留 alpha：RGBA 原样保存（必要时改为 PNG）===
+        # === 处理透明背景 -> 白底 ===
         if not os.path.exists(dst_path):
             with Image.open(src_path) as img:
-                saved_path, saved_name = _save_keep_alpha(img, dst_path)
+                saved_path, saved_name = _save_white_bg(img, dst_path)
                 final_img_name = saved_name
                 dst_path = saved_path
         else:
-            # 目标文件已存在，但如果原本命名是 jpg 且实际应为 png（第一次生成时已修正），
-            # 这里不强制再改，避免覆盖；若你想强制一致可自行清理输出目录后重跑。
             pass
 
         w = int(frame.get("w", global_params["w"] or 0))
@@ -248,7 +238,7 @@ def process_frame(in_frame_dir, out_frame_dir, frame_name):
         f.write("# POINT3D_ID, X, Y, Z, R, G, B, ERROR, TRACK[] as (IMAGE_ID, POINT2D_IDX)\n")
         f.write("1 0 0 0 128 128 128 0.0\n")
 
-    print(f"  -> Done. {len(images)} images processed (Alpha preserved if present).")
+    print(f"  -> Done. {len(images)} images processed (White Background applied).")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

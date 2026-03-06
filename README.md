@@ -195,18 +195,7 @@ What it does:
 
 **Important:** `--warm_chain` requires that you pass `--iterations N` *after* the `--` (i.e., in the forwarded `train.py` args).
 
-#### Example: Warm + NoDensify (recommended for long sequences)
-```bash
-python ta_train.py \
-  -s ./dataset/soccer_B_70cams \
-  -o ./output_seq/soccer_B_70cams \
-  --frames all \
-  --resume-if-exists \
-  --warm_chain \
-  -- \
-  --disable_viewer -r 1 \
-  --iterations 8000 \
-  --densify_until_iter 0 --densification_interval 0
+
 ```
 
 #### Example: Warm + Densify (best quality, but slows down over time)
